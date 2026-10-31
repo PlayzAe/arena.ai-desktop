@@ -763,3 +763,39 @@ def test_generated_media_is_saved_to_the_picked_folder(web, tmp_path, monkeypatc
     saved = list((tmp_path / "ws").glob("*-a-*.png"))
     assert len(saved) == 1 and saved[0].read_bytes() == b"PNG" and "Saved to" in out[0]
 
+
+def test_sandbox_ops_from_arena_tool_calls():
+    from arena import contracts
+    op = contracts.sandbox_op({"toolCallId": "1", "toolName": "create_file", "args": {"path": "src/a.ts", "content": "x"}})
+    assert op["kind"] == "write" and op["path"] == "src/a.ts" and op["content"] == "x"
+    op = contracts.sandbox_op({"toolCallId": "2", "toolName": "str_replace_based_edit_tool",
+                               "args": json.dumps({"command": "str_replace", "path": "a.ts", "old_str": "x", "new_str": "y"})})
+    assert op["kind"] == "edit" and (op["old"], op["new"]) == ("x", "y")
+    assert contracts.sandbox_op({"toolName": "bash", "args": {"command": "npm install"}})["kind"] == "run"
+    assert contracts.sandbox_op({"toolName": "read_file", "args": {"path": "package.json"}})["kind"] == "read"
+    assert contracts.parse_line('aa:{"toolCallId":"1","result":"ok"}') == ("a", "tool_result", {"toolCallId": "1", "result": "ok"})
+    assert contracts.parse_line('b9:{"toolCallId":"1"}')[:2] == ("b", "tool_call")
+
+
+def test_code_answer_is_copied_into_the_picked_folder_and_local_edits_go_back(web, tmp_path):
+    appmod, c, cfg, use, sent = web
+    cfg.update(permission_mode="acceptEdits", workspace_dir=str(tmp_path / "ws"))
+    appmod._ui_mode, appmod._ui_modality = "direct", "code"
+    create = {"toolCallId": "t1", "toolName": "create_file", "args": {"path": "src/App.tsx", "content": "hello\nworld\n"}}
+    edit = {"toolCallId": "t2", "toolName": "edit_file", "args": {"path": "src/App.tsx", "old_str": "world", "new_str": "arena"}}
+    use(FakeResp(['a0:"I will create src/App.tsx."', "a9:" + json.dumps(create), 'aa:{"toolCallId":"t1","result":"ok"}',
+                  "a9:" + json.dumps(edit), 'aa:{"toolCallId":"t2","result":{"url":"https://x1.arena.site/"}}', 'a0:"Done."']))
+    ev = events(c.post("/api/chat", json={"message": "build", "model_id": "m1"}))
+    app_tsx = tmp_path / "ws" / "src" / "App.tsx"
+    assert app_tsx.read_bytes() == b"hello\narena\n"
+    rows = [e for e in ev if e["type"] == "sandbox"]
+    assert [r["verb"] for r in rows] == ["Created", "Edited"] and (rows[1]["add"], rows[1]["del"]) == (1, 1)
+    assert any(e["type"] == "preview" and e["url"] == "https://x1.arena.site/" for e in ev)
+    cid = ev[0]["chat_id"]
+    assert [r["verb"] for r in appmod._load_chat(cid)["messages"][-1]["sandbox"]] == ["Created", "Edited"]
+    app_tsx.write_bytes(b"hello\nmine\n")
+    use(FakeResp(['a0:"ok"']))
+    events(c.post("/api/chat", json={"message": "next", "model_id": "m1", "chat_id": cid}))
+    content = sent[-1][1]["userMessage"]["content"]
+    assert "--- src/App.tsx ---\nhello\nmine\n" in content and content.endswith("My message:\nnext")
+

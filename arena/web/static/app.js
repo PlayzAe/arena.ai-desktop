@@ -679,8 +679,9 @@ async function loadChat(chatId) {
       if (m.role === 'user') {
         appendMsg('user', m.text);
       } else {
-        if (m.text_b || m.tools?.some(t => t.lane === 'b')) {
-          const lt = l => (m.tools || []).filter(t => (t.lane || 'a') === l).map(toolCardHtml).join('');
+        if (m.text_b || m.tools?.some(t => t.lane === 'b') || m.sandbox?.some(r => r.model === 'b')) {
+          const lt = l => (m.tools || []).filter(t => (t.lane || 'a') === l).map(toolCardHtml).join('')
+            + (m.sandbox || []).filter(r => (r.model || 'a') === l).map(sandboxRow).join('');
           const el = appendMsg('assistant', '');
           el.innerHTML = `
             <div class="msg-header"><span class="msg-role assistant">Arena AI</span></div>
@@ -695,6 +696,7 @@ async function loadChat(chatId) {
           const role = el.querySelector('.msg-role');
           if (role && m.names?.a) role.textContent = m.names.a;
           if (m.tools?.length) content.insertAdjacentHTML('afterbegin', m.tools.map(toolCardHtml).join(''));
+          if (m.sandbox?.length) content.insertAdjacentHTML('afterbegin', m.sandbox.map(sandboxRow).join(''));
           if (!m.text && m.error) content.insertAdjacentHTML('beforeend', `<div class="notice-line err">Not sent: ${esc(m.error)}</div>`);
           else if (!m.text && !m.tools?.length) content.insertAdjacentHTML('beforeend', '<div class="notice-line">No reply was received.</div>');
           hlAll(content); addCopyBtns(content);
@@ -1309,6 +1311,29 @@ function diffHtml(d) {
   }).join('');
 }
 
+// Activity rows for arena.ai's own sandbox steps ("Created src/App.tsx"), like arena.ai shows them.
+const SB_ICONS = {
+  write: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M12 18v-6M9 15h6"/>',
+  edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
+  run: '<path d="m4 17 6-6-6-6M12 19h8"/>',
+  read: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/>',
+};
+function sandboxRowHtml(r) {
+  const key = { write: r.verb === 'Created' ? 'write' : 'edit', edit: 'edit', download: 'write', delete: 'edit', touch: 'edit', run: 'run' }[r.kind] || 'read';
+  const target = r.kind === 'run' ? (r.detail || '') : (r.path || r.detail || '');
+  const stats = (r.add || r.del) ? `<span class="diff-stat"><b class="add">+${r.add || 0}</b> <b class="del">-${r.del || 0}</b></span>` : '';
+  const note = r.error ? `<span class="sb-note warn-text">${esc(r.error)}</span>` : (r.abs ? '<span class="sb-note">on your PC</span>' : '');
+  return `<svg class="sb-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${SB_ICONS[key]}</svg>`
+    + `<span class="sb-verb">${esc(r.verb || r.kind)}</span><span class="sb-path">${esc(target)}</span>${stats}<span class="sb-state"></span>${note}`;
+}
+function sandboxRow(r) {
+  return `<div class="sb-row${r.ok === false ? ' err' : r.ok ? ' ok' : ''}"${r.abs ? ` data-abs="${esc(r.abs)}"` : ''}>${sandboxRowHtml(r)}</div>`;
+}
+document.addEventListener('click', e => {
+  const row = e.target.closest && e.target.closest('.sb-row[data-abs]');
+  if (row) openFile(row.dataset.abs);
+});
+
 class ReplyView {
   constructor(el) {
     this.el = el;
@@ -1397,6 +1422,8 @@ class ReplyView {
       case 'notice': this.add(l, 'notice-line', esc(ev.text)); break;
       case 'tool_call': this.toolCall(ev); break;
       case 'tool_result': this.toolResult(ev); break;
+      case 'sandbox': this.sandbox(l, ev); break;
+      case 'sandbox_done': this.sandboxDone(ev); break;
       case 'permission': this.permission(ev); break;
       case 'permission_done': this.permissionDone(ev); break;
       case 'webdev': this.webdev(l, ev); break;
@@ -1408,6 +1435,21 @@ class ReplyView {
       case 'error': this.error(ev); break;
       case 'done': this.done(ev); break;
     }
+  }
+
+  sandbox(l, ev) {
+    const key = l + ':' + ev.id;
+    const old = (this.rows = this.rows || {})[key];
+    const row = old && ev.id ? old : this.add(l, 'sb-row', '');
+    row.className = 'sb-row' + (ev.pending ? ' pending' : '');
+    row.innerHTML = sandboxRowHtml(ev);
+    if (ev.abs) row.dataset.abs = ev.abs;
+    this.rows[key] = row;
+  }
+
+  sandboxDone(ev) {
+    const row = (this.rows || {})[(ev.model || 'a') + ':' + ev.id];
+    if (row) row.classList.add(ev.ok ? 'ok' : 'err');
   }
 
   toolCall(ev) {

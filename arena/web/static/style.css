@@ -762,3 +762,24 @@ body.arena-pane .pane-close { display: inline-flex; }
 .sbs-col { padding: 0 16px 14px; background: var(--surface-secondary); }
 .sbs-head { margin: 0 -16px 12px; padding: 10px 16px; border-bottom: 1px solid var(--border-faint); font-family: ui-monospace, Consolas, monospace; }
 
+/* ── Sandbox activity rows, like arena.ai's "Created src/App.tsx" (click opens the copy on this PC) ── */
+.sb-row { display: flex; align-items: center; gap: 8px; padding: 4px 6px; margin: 0 -6px; font-size: 13px; color: var(--text-secondary); min-width: 0; border-radius: var(--radius-sm); }
+.sb-row .sb-icon { flex-shrink: 0; color: var(--text-tertiary); }
+.sb-verb { color: var(--text-primary); flex-shrink: 0; }
+.sb-path { font-family: ui-monospace, Consolas, monospace; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.sb-row[data-abs] { cursor: pointer; }
+.sb-row[data-abs]:hover { background: var(--surface-raised); }
+.sb-row[data-abs]:hover .sb-path { text-decoration: underline; color: var(--text-primary); }
+.sb-state { width: 14px; flex-shrink: 0; }
+.sb-row.ok .sb-state::after { content: '\2713'; color: #3fb950; font-weight: 700; }
+.sb-row.err .sb-state::after { content: '\2717'; color: #e84e4a; font-weight: 700; }
+.sb-note { margin-left: auto; font-size: 11px; color: var(--text-tertiary); flex-shrink: 0; }
+
+/* ── Thinking: one shimmering word instead of the old dots ── */
+.lane:empty::after { content: none; animation: none; }
+.lane:empty::before { content: 'Thinking'; display: inline-block; font-size: 13px; font-weight: 500; color: transparent;
+  background: linear-gradient(90deg, var(--text-tertiary) 0%, var(--text-tertiary) 35%, var(--text-primary) 50%, var(--text-tertiary) 65%, var(--text-tertiary) 100%);
+  background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; animation: think-shimmer 1.8s linear infinite; }
+@keyframes think-shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+.sb-row.pending .sb-verb, .sb-row.pending .sb-path { color: var(--text-tertiary); }
+

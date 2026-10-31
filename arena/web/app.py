@@ -3,6 +3,8 @@ Flask web backend for Arena.ai desktop client.
 Serves the web UI and proxies chat requests to arena.ai.
 """
 
+import difflib
+import hashlib
 import json
 import logging
 import mimetypes
@@ -740,6 +742,20 @@ def _webdev_event(lane: str, item: dict, conv: dict):
                     "message": item.get("message") or item.get("reason")})
 
 
+# ARENA_STREAM_DUMP=1 writes every raw stream line to ~/.arena-cli/streams/<chat>.txt, to study arena's stream parts.
+_DUMP_DIR = (CHATS_DIR.parent / "streams") if os.environ.get("ARENA_STREAM_DUMP") else None
+
+
+def _dump_line(conv: dict, line) -> None:
+    raw = line if isinstance(line, str) else line.decode("utf-8", "replace")
+    try:
+        _DUMP_DIR.mkdir(parents=True, exist_ok=True)
+        with open(_DUMP_DIR / f"{conv['chat_id'][:8]}.txt", "a", encoding="utf-8") as f:
+            f.write(raw.rstrip("\r\n") + "\n")
+    except OSError:
+        pass
+
+
 def _save_media(m: dict, lane: str, conv: dict):
     """Keep a generated image, video or sound in the folder the user picked (when they picked one)."""
     ws = _chosen_ws()
@@ -761,12 +777,162 @@ def _save_media(m: dict, lane: str, conv: dict):
     yield _sse({"type": "notice", "model": lane, "text": f"Saved to {target}"})
 
 
+def _code_root(chat_id: str, title: str, lane: str, mode: str) -> Path:
+    """Where the files an AI builds land: the picked folder (option-a/option-b when two models answer),
+    else this chat's own folder under ArenaProjects."""
+    ws = _chosen_ws()
+    if ws is None:
+        return workspace.project_dir(chat_id, title, lane)
+    return (ws / agent.LANE_DIRS[lane] if mode in ("battle", "side-by-side") else ws).expanduser().resolve()
+
+
+def _sync_file(root: Path) -> Path:
+    return CHATS_DIR.parent / "sync" / (hashlib.sha1(str(root).lower().encode()).hexdigest()[:16] + ".json")
+
+
+def _sync_load(root: Path) -> dict:
+    """What the AI last wrote to each file in a folder (path -> sha1), to spot the user's own edits."""
+    try:
+        return json.loads(_sync_file(root).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _sync_save(root: Path, man: dict) -> None:
+    try:
+        f = _sync_file(root)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(man), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _digest(data: bytes) -> str:
+    return hashlib.sha1(data).hexdigest()
+
+
+def _line_delta(old: str, new: str):
+    """Lines added and removed between two versions of a file."""
+    add = rem = 0
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old.splitlines(), new.splitlines(), autojunk=False).get_opcodes():
+        if tag in ("replace", "delete"):
+            rem += i2 - i1
+        if tag in ("replace", "insert"):
+            add += j2 - j1
+    return add, rem
+
+
+_SB_VERB = {"read": "Read", "run": "Ran", "touch": "Changed"}
+
+
+def _sandbox_call(lane: str, call: dict, conv: dict):
+    """arena.ai's model used one of arena's own sandbox tools. Copy file writes, edits, deletes and downloads
+    into the local project folder, and show the step as an activity row like arena.ai's."""
+    op = contracts.sandbox_op(call)
+    LOG.info("chat %s sandbox %s %s %s", conv["chat_id"][:8], lane, op["tool"], op.get("path") or op.get("detail", ""))
+    row = {"id": op["id"], "kind": op["kind"], "tool": op["tool"], "path": op.get("path"), "detail": op.get("detail"),
+           "verb": _SB_VERB.get(op["kind"], op["tool"])}
+    if op["kind"] in ("write", "edit") and not (op.get("content") or op.get("old")):
+        # arena.ai streams each call twice: first with empty arguments, then complete. Write on the complete one.
+        row.update(verb="Writing" if op["kind"] == "write" else "Editing", pending=True)
+    elif op["kind"] in ("write", "edit", "delete", "download"):
+        root = _code_root(conv["chat_id"], conv["title"], lane, conv["mode"])
+        if conv.get("mirror_ok") is None:
+            info = {"tool": "write_file", "summary": f"Copy the files the AI writes into {root}", "inside": True,
+                    "path": str(root), "rel": ".", "model": lane}
+            conv["mirror_ok"] = (yield from _permit(_perm_mode(), "write_file", info)) == "allow"
+        try:
+            if not conv["mirror_ok"]:
+                raise PermissionError("not copied: the permission mode does not allow it")
+            target = workspace._inside(root, op["path"])
+            rel = target.relative_to(root).as_posix()
+            man = _sync_load(root)
+            old = target.read_text(encoding="utf-8", errors="replace") if target.is_file() else None
+            if op["kind"] == "delete":
+                if target.is_file():
+                    target.unlink()
+                man.pop(rel, None)
+                row["verb"] = "Deleted"
+            else:
+                if op["kind"] == "download":
+                    r = requests.get(op["url"], timeout=60)
+                    r.raise_for_status()
+                    data = r.content
+                    row["verb"] = "Saved"
+                else:
+                    if op["kind"] == "edit":
+                        if old is None or op["old"] not in old:
+                            raise ValueError("not copied: your copy of this file differs from the AI's")
+                        new = old.replace(op["old"], op["new"], 1)
+                    else:
+                        new = op["content"]
+                    row["add"], row["del"] = _line_delta(old or "", new)
+                    row["verb"] = "Created" if old is None else "Edited"
+                    data = new.encode("utf-8")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+                man[rel] = _digest(data)
+            _sync_save(root, man)
+            row.update(abs=str(target), root=str(root))
+        except (OSError, ValueError, requests.RequestException) as e:
+            row["error"] = str(e)[:160]
+    rows = conv.setdefault("sandbox", [])
+    if row["id"]:
+        rows[:] = [r for r in rows if not (r.get("id") == row["id"] and r.get("model") == lane)]
+    rows.append(dict(row, model=lane))
+    yield _sse(dict(row, type="sandbox", model=lane))
+
+
+def _sandbox_result(lane: str, res: dict, conv: dict):
+    """A sandbox tool finished: tick its row, and pass on any preview link (<id>.arena.site) it carries."""
+    rid = res.get("toolCallId") or res.get("id")
+    out = res.get("result", res.get("output"))
+    bad = isinstance(out, dict) and bool(out.get("error") or out.get("success") is False or out.get("isError"))
+    for row in conv.get("sandbox", []):
+        if row.get("id") == rid and row.get("model") == lane:
+            row["ok"] = not bad
+    yield _sse({"type": "sandbox_done", "model": lane, "id": rid, "ok": not bad})
+    url = contracts.find_preview_url(out)
+    if url and url not in conv.setdefault("previews", set()):
+        conv["previews"].add(url)
+        yield _sse({"type": "preview", "model": lane, "url": url})
+
+
+def _local_edits(root: Path):
+    """Files the user changed on disk since the AI last wrote them, as a note in front of the next message."""
+    man = _sync_load(root)
+    changed, parts, size = [], [], 0
+    for rel, digest in list(man.items()):
+        try:
+            data = (root / rel).read_bytes()
+        except OSError:
+            continue
+        if _digest(data) == digest:
+            continue
+        changed.append(rel)
+        text = data.decode("utf-8", "replace")
+        if size + len(text) <= 60_000 and len(parts) < 12:
+            parts.append(f"--- {rel} ---\n{text}")
+            size += len(text)
+        man[rel] = _digest(data)
+    if not changed:
+        return [], ""
+    _sync_save(root, man)
+    extra = [r for r in changed if not any(p.startswith(f"--- {r} ---") for p in parts)]
+    note = ("I edited these files on my computer since your last change. Update your copy of each one to exactly "
+            "this content before you continue:\n\n" + "\n\n".join(parts)
+            + (f"\n\nAlso changed (too large to include): {', '.join(extra)}" if extra else "") + "\n\nMy message:\n")
+    return changed, note
+
+
 def _line_events(r, conv: dict):
     """Turn arena's stream into SSE events; returns the answer text per lane."""
     out = {"a": "", "b": ""}
     split = contracts.LineSplitter()
 
     def handle(line):
+        if _DUMP_DIR:
+            _dump_line(conv, line)
         parsed = contracts.parse_line(line)
         if not parsed:
             return
@@ -781,6 +947,10 @@ def _line_events(r, conv: dict):
         elif kind == "error":
             yield _sse({"type": "error", "code": "model", "model": lane, "retry": True,
                         "message": f"Model {lane.upper()} stopped with an error: {value}"})
+        elif kind == "tool_call" and isinstance(value, dict):
+            yield from _sandbox_call(lane, value, conv)
+        elif kind == "tool_result" and isinstance(value, dict):
+            yield from _sandbox_result(lane, value, conv)
         elif kind in ("data", "file", "annotation"):
             items = contracts.webdev_items(value)
             for item in items:
@@ -972,9 +1142,9 @@ def api_chat():
     _current_chat_id = data.get("chat_id") or str(uuid.uuid4())
     _stop.clear()
     existing = _load_chat(_current_chat_id) or {}
-    # Each chat keeps its own history and arena conversation; a new mode, modality or model starts a new one.
-    same = bool(existing) and (existing.get("mode"), existing.get("modality"), existing.get("model_a"), existing.get("model_b")) \
-        == (_ui_mode, _ui_modality, model_a, model_b)
+    # Each chat keeps its own history and arena conversation. Switching models keeps it, like arena.ai's own
+    # follow-up box; a new mode or modality starts a new one.
+    same = bool(existing) and (existing.get("mode"), existing.get("modality")) == (_ui_mode, _ui_modality)
     eval_id = existing.get("eval_id") if same else None
     conv = {"eval_id": eval_id, "new": not eval_id, "mode": mode, "modality": modality,
             "model_a": model_a, "model_b": model_b, "chat_id": _current_chat_id,
@@ -992,16 +1162,24 @@ def api_chat():
         _tl.error = None
         yield _sse({"type": "meta", "dual": dual, "mode": ui_mode, "modality": ui_modality,
                     "chat_id": conv["chat_id"], "permission_mode": _perm_mode(), "names": names})
+        send = message
+        if modality == "webdev" and not dual and not conv["new"]:
+            changed, note = _local_edits(_code_root(conv["chat_id"], conv["title"], "a", conv["mode"]))
+            if changed:
+                send = note + message
+                yield _sse({"type": "notice", "text": "Sent your local edits to the AI: " + ", ".join(changed)})
         if tools_on:
-            out = yield from _agent_run(client, message, conv)
+            out = yield from _agent_run(client, send, conv)
         else:
-            out = yield from _turn(client, message, conv)
+            out = yield from _turn(client, send, conv)
         out = out or {"a": "", "b": ""}
         client.eval_id = None if conv["new"] else conv["eval_id"]
         clean = agent.strip_tool_calls if tools_on else str
         reply = {"role": "assistant", "text": clean(out["a"]), "text_b": clean(out["b"]), "names": names}
         if conv["tools"]:
             reply["tools"] = conv["tools"]
+        if conv.get("sandbox"):
+            reply["sandbox"] = conv["sandbox"]
         if not (out["a"] or out["b"]) and _tl.error:
             reply["error"] = _tl.error
         history.append(reply)

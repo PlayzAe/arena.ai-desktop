@@ -24,7 +24,7 @@ _SKIP = {".git", "node_modules", "__pycache__", ".venv", "venv", ".next", "dist"
 _WRITES = {"write_file", "edit_file", "mkdir", "delete"}
 LANE_DIRS = {"a": "option-a", "b": "option-b"}
 
-GUIDE = """[Arena Desktop] The user is chatting through Arena Desktop, an app on their own computer. It connects you to a folder on that computer with working tools: you can list, read, search, create, edit and delete files there and run commands. Do not say you lack file access or tell the user to make the files themselves; use the tools.
+GUIDE = """[Arena Desktop] The user is chatting through Arena Desktop, an app on their own computer. It connects you to a folder on that computer with working tools: you can list, read, search, create, edit and delete files there and run commands. Do not say you lack file access or tell the user to make the files themselves; use the tools. Your own built-in tools (a code sandbox, file or web tools) run on a remote server and cannot reach this computer, so for files here use only the tags below.
 Folder: {root}
 Permission mode: {mode_label}. {mode_note}{lane_note}
 

@@ -41,6 +41,7 @@ UI_MODALITIES = {"auto": "chat", "text": "chat", "chat": "chat", "code": "webdev
 
 # AI SDK data-stream type codes. arena prefixes each line with a lane: a or b.
 STREAM_TYPES = {"0": "text", "2": "data", "3": "error", "8": "annotation", "9": "tool_call",
+                "a": "tool_result", "b": "tool_start", "c": "tool_delta",
                 "d": "finish", "e": "step", "f": "step_start", "g": "reasoning", "h": "source", "k": "file"}
 
 
@@ -216,6 +217,8 @@ def find_preview_url(value: Any, depth: int = 0) -> Optional[str]:
         items = list(value.values())
     elif isinstance(value, list):
         items = value
+    elif isinstance(value, str) and value.startswith("http") and ".arena.site" in value:
+        return value
     else:
         return None
     for v in items:
@@ -223,6 +226,49 @@ def find_preview_url(value: Any, depth: int = 0) -> Optional[str]:
         if found:
             return found
     return None
+
+
+_PATH_KEYS = ("path", "file_path", "filePath", "filename", "file", "target_file", "targetFile", "relative_path")
+_CONTENT_KEYS = ("content", "file_text", "fileText", "contents", "code", "new_content", "text")
+_OLD_KEYS = ("old_str", "old_string", "oldString", "old_text", "oldText", "context", "search", "find")
+_NEW_KEYS = ("new_str", "new_string", "newString", "new_text", "newText", "replace", "replacement")
+_URL_KEYS = ("url", "src", "source_url", "image_url", "imageUrl", "media_url")
+_LOOK_WORDS = ("read", "view", "cat", "list", "ls", "open", "get", "search", "find", "grep", "inspect", "glob")
+
+
+def sandbox_op(call: Dict[str, Any]) -> Dict[str, Any]:
+    """What one of arena.ai's own sandbox tool calls does: write, edit, delete or download a file,
+    read (look only), run a command, change a file some other way (touch) or something else."""
+    name = str(call.get("toolName") or call.get("name") or "tool")
+    args = call.get("args", call.get("input"))
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except ValueError:
+            args = {}
+    args = args if isinstance(args, dict) else {}
+
+    def pick(keys):
+        return next((args[k] for k in keys if isinstance(args.get(k), str)), None)
+
+    low, sub = name.lower(), str(args.get("command") or "").lower()
+    op = {"id": call.get("toolCallId") or call.get("id"), "tool": name, "path": pick(_PATH_KEYS)}
+    content, old, new, url = pick(_CONTENT_KEYS), pick(_OLD_KEYS), pick(_NEW_KEYS), pick(_URL_KEYS)
+    if op["path"] and old is not None and new is not None:
+        op.update(kind="edit", old=old, new=new)
+    elif op["path"] and content is not None and sub != "view":
+        op.update(kind="write", content=content)
+    elif op["path"] and url and url.startswith("http"):
+        op.update(kind="download", url=url)
+    elif op["path"] and ("delete" in low or "remove" in low or sub in ("delete", "rm")):
+        op["kind"] = "delete"
+    elif op["path"]:
+        op["kind"] = "read" if any(w in low or w == sub for w in _LOOK_WORDS) else "touch"
+    elif any(w in low for w in ("bash", "shell", "terminal", "exec", "command", "run")):
+        op.update(kind="run", detail=str(args.get("command") or args.get("cmd") or "")[:200])
+    else:
+        op.update(kind="other", detail=", ".join(str(k) for k in list(args)[:4]))
+    return op
 
 
 def webdev_items(value: Any) -> List[Dict[str, Any]]:
