@@ -598,7 +598,7 @@ async function sendMessage(retryText) {
 
 function appendMsg(role, text, streaming = false) {
   const el = document.createElement('div');
-  el.className = 'message';
+  el.className = 'message from-' + role;
   el.innerHTML = `
     <div class="msg-header">
       <span class="msg-role ${role}">${role === 'user' ? 'You' : 'Arena AI'}</span>
@@ -679,13 +679,14 @@ async function loadChat(chatId) {
       if (m.role === 'user') {
         appendMsg('user', m.text);
       } else {
-        if (m.text_b) {
+        if (m.text_b || m.tools?.some(t => t.lane === 'b')) {
+          const lt = l => (m.tools || []).filter(t => (t.lane || 'a') === l).map(toolCardHtml).join('');
           const el = appendMsg('assistant', '');
           el.innerHTML = `
             <div class="msg-header"><span class="msg-role assistant">Arena AI</span></div>
             <div class="sbs-container">
-              <div class="sbs-column"><div class="sbs-header"><span class="sbs-badge a">A</span> ${esc(m.names?.a || 'Model A')}</div><div class="msg-content sbs-content">${renderMd(m.text)}</div></div>
-              <div class="sbs-column"><div class="sbs-header"><span class="sbs-badge b">B</span> ${esc(m.names?.b || 'Model B')}</div><div class="msg-content sbs-content">${renderMd(m.text_b)}</div></div>
+              <div class="sbs-column"><div class="sbs-header"><span class="sbs-badge a">A</span> ${esc(m.names?.a || 'Model A')}</div><div class="msg-content sbs-content">${lt('a')}${renderMd(m.text)}</div></div>
+              <div class="sbs-column"><div class="sbs-header"><span class="sbs-badge b">B</span> ${esc(m.names?.b || 'Model B')}</div><div class="msg-content sbs-content">${lt('b')}${renderMd(m.text_b)}</div></div>
             </div>`;
           el.querySelectorAll('.sbs-content').forEach(c => { hlAll(c); addCopyBtns(c); });
         } else {
@@ -1300,7 +1301,7 @@ const ERR_TITLES = {
 
 function attr(s) { return esc(String(s ?? '')).replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
 function safeUrl(u) { u = String(u || ''); return /^(https?:|data:(image|video|audio)\/)/i.test(u) ? u : '#'; }
-function stripTools(raw) { return raw.replace(/<tool\s+name\s*=\s*["'][\w-]+["']\s*>[\s\S]*?(?:<\/tool\s*>|$)/gi, ''); }
+function stripTools(raw) { return raw.replace(/<tool\s+name\s*=\s*["']?[\w-]+["']?\s*>[\s\S]*?(?:<\/tool\s*>|$)/gi, '').replace(/```[\w-]*[ \t]*\n?\s*```/g, ''); }
 function diffHtml(d) {
   return String(d || '').split('\n').map(l => {
     const cls = l.startsWith('+') && !l.startsWith('+++') ? 'add' : l.startsWith('-') && !l.startsWith('---') ? 'del' : l.startsWith('@@') ? 'hunk' : '';
@@ -1371,7 +1372,7 @@ class ReplyView {
 
   paint(seg) {
     seg.pending = false;
-    seg.innerHTML = renderMd(this.mode === 'agent' ? stripTools(seg.raw || '') : (seg.raw || ''));
+    seg.innerHTML = renderMd(stripTools(seg.raw || ''));
     scrollBottom();
   }
 
@@ -1391,7 +1392,7 @@ class ReplyView {
       case 'text': this.text(l, ev.text || ''); break;
       case 'reasoning': this.reasoning(l, ev.text || ''); break;
       case 'source': (this.sources[l] = this.sources[l] || []).push(ev.data); break;
-      case 'agent': this.add('a', 'notice-line', `Agent working in <code>${esc(ev.root)}</code> &middot; ${esc(PERM_LABELS[ev.mode] || ev.mode)}`); break;
+      case 'agent': this.add('a', 'notice-line', `Files: <code>${esc(ev.root)}</code> &middot; ${esc(PERM_LABELS[ev.mode] || ev.mode)}${ev.dual ? ' &middot; A writes to option-a, B to option-b' : ''}`); break;
       case 'round': this.add('a', 'notice-line', `Round ${esc(ev.n)}`); break;
       case 'notice': this.add(l, 'notice-line', esc(ev.text)); break;
       case 'tool_call': this.toolCall(ev); break;
@@ -1411,7 +1412,7 @@ class ReplyView {
 
   toolCall(ev) {
     const st = ev.diff ? diffStats(ev.diff) : null;
-    const card = this.add('a', 'card tool' + (st ? ' has-diff' : ''), `<div class="card-head"><span class="tag">${esc(KIND_LABEL[ev.tool] || ev.tool)}</span><span class="card-sub">${esc(ev.summary || ev.rel || '')}</span>`
+    const card = this.add(ev.model || 'a', 'card tool' + (st ? ' has-diff' : ''), `<div class="card-head"><span class="tag">${esc(KIND_LABEL[ev.tool] || ev.tool)}</span><span class="card-sub">${esc(ev.summary || ev.rel || '')}</span>`
       + (st ? `<span class="diff-stat"><b class="add">+${st.add}</b> <b class="del">-${st.del}</b></span>` : '') + `<span class="tool-state">...</span></div>`
       + (ev.diff ? `<details class="diff-drop"><summary>Show changes</summary><pre class="diff">${diffHtml(ev.diff)}</pre></details>` : '')
       + '<div class="tool-out"></div>');

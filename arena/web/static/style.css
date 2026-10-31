@@ -751,3 +751,14 @@ body.arena-pane .pane-close { display: inline-flex; }
 .diff-drop > summary::-webkit-details-marker { display: none; }
 .diff-drop > summary:hover { color: var(--text-secondary); }
 
+/* ── Wider chat, closer to arena.ai: wide answers, your messages as right-aligned bubbles ── */
+.message { max-width: 980px; }
+.input-container { max-width: 980px; }
+.message:has(.sbs-grid), .message:has(.sbs-container) { max-width: 1480px; padding-left: 24px; padding-right: 24px; }
+.message.from-user .msg-header { display: none; }
+.message.from-user .msg-content { width: fit-content; max-width: 78%; margin-left: auto; padding: 10px 14px; border-radius: 14px;
+  background: var(--surface-raised); border: 1px solid var(--border-faint); color: var(--text-primary); }
+.sbs-grid { gap: 16px; }
+.sbs-col { padding: 0 16px 14px; background: var(--surface-secondary); }
+.sbs-head { margin: 0 -16px 12px; padding: 10px 16px; border-bottom: 1px solid var(--border-faint); font-family: ui-monospace, Consolas, monospace; }
+

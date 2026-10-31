@@ -5,6 +5,7 @@ Serves the web UI and proxies chat requests to arena.ai.
 
 import json
 import logging
+import mimetypes
 import os
 import sys
 import threading
@@ -12,6 +13,9 @@ import time
 import webbrowser
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
+
+import requests
 
 from flask import Flask, Response, jsonify, request, send_file, send_from_directory, stream_with_context
 
@@ -596,6 +600,12 @@ def _workspace_dir() -> Path:
     return Path(raw).expanduser() if raw else workspace.PROJECTS_DIR / "workspace"
 
 
+def _chosen_ws() -> Optional[Path]:
+    """The folder the user picked in the composer, or None when they have not picked one."""
+    raw = load_config().get("workspace_dir")
+    return Path(raw).expanduser() if raw else None
+
+
 class _HttpStream:
     """A requests response with the EngineResponse interface, for running without the desktop engine."""
 
@@ -694,7 +704,7 @@ def _preview_url(root: Path):
 
 def _save_webdev(lane: str, files: list, conv: dict):
     """Mirror a code answer into its local project folder, asking first unless the mode allows edits."""
-    root = workspace.project_dir(conv["chat_id"], conv["title"], lane)
+    root = workspace.project_dir(conv["chat_id"], conv["title"], lane, base=_chosen_ws())
     plan = workspace.plan_project(root, files)
     mode = _perm_mode()
     write = delete = False
@@ -730,6 +740,27 @@ def _webdev_event(lane: str, item: dict, conv: dict):
                     "message": item.get("message") or item.get("reason")})
 
 
+def _save_media(m: dict, lane: str, conv: dict):
+    """Keep a generated image, video or sound in the folder the user picked (when they picked one)."""
+    ws = _chosen_ws()
+    done = conv.setdefault("media_saved", set())
+    if ws is None or m["url"] in done:
+        return
+    done.add(m["url"])
+    try:
+        r = requests.get(m["url"], timeout=120)
+        r.raise_for_status()
+        ext = Path(urlparse(m["url"]).path).suffix[:6] or mimetypes.guess_extension(
+            (r.headers.get("content-type") or "").split(";")[0].strip()) or ".bin"
+        ws.mkdir(parents=True, exist_ok=True)
+        target = ws / f"{workspace.slug(conv['title'])}-{lane}-{uuid.uuid4().hex[:6]}{ext}"
+        target.write_bytes(r.content)
+    except (requests.RequestException, OSError) as e:
+        yield _sse({"type": "notice", "model": lane, "text": f"Could not save the {m.get('kind') or 'file'}: {e}"})
+        return
+    yield _sse({"type": "notice", "model": lane, "text": f"Saved to {target}"})
+
+
 def _line_events(r, conv: dict):
     """Turn arena's stream into SSE events; returns the answer text per lane."""
     out = {"a": "", "b": ""}
@@ -757,6 +788,7 @@ def _line_events(r, conv: dict):
             if not items:
                 for m in contracts.find_media(value):
                     yield _sse(dict(m, type="media", model=lane))
+                    yield from _save_media(m, lane, conv)
                 url = contracts.find_preview_url(value)
                 if url:
                     yield _sse({"type": "preview", "model": lane, "url": url})
@@ -841,57 +873,63 @@ def _turn(client: ArenaClient, content: str, conv: dict):
 
 
 def _agent_run(client: ArenaClient, message: str, conv: dict):
-    """Agent mode: the model asks for local tools and the app runs them under the permission mode."""
+    """Local tools in a text chat: each model asks for tools and the app runs them under the permission mode.
+    In Battle and Side by Side each model writes to its own copy of the folder (option-a, option-b)."""
     root = _workspace_dir()
     root.mkdir(parents=True, exist_ok=True)
-    tools = agent.LocalTools(root)
+    lanes = ("a", "b") if conv["mode"] in ("battle", "side-by-side") else ("a",)
+    dual = len(lanes) == 2
+    tools = {l: agent.LocalTools(root, root / agent.LANE_DIRS[l] if dual else None) for l in lanes}
     mode = _perm_mode()
     content = message
     if conv["new"]:
-        content = agent.GUIDE.format(root=root, mode_label=permissions.MODES[mode],
-                                     mode_note=agent.MODE_NOTES[mode]) + "\n\nTask:\n" + message
+        content = agent.guide(root, permissions.MODES[mode], agent.MODE_NOTES[mode], dual) + message
     total = {"a": "", "b": ""}
-    yield _sse({"type": "agent", "root": str(root), "mode": mode})
+    yield _sse({"type": "agent", "root": str(root), "mode": mode, "dual": dual})
     for rnd in range(1, agent.MAX_ROUNDS + 1):
         out = yield from _turn(client, content, conv)
         if out is None:
             break
-        total["a"] += out["a"]
-        calls = agent.parse_tool_calls(out["a"])
-        if not calls or _stop.is_set():
+        calls = {l: agent.parse_tool_calls(out[l]) for l in lanes}
+        for l in lanes:
+            total[l] += out[l]
+        if not any(calls.values()) or _stop.is_set():
             break
         mode = _perm_mode()
-        outcomes = []
-        for call in calls:
-            if _stop.is_set():
-                outcomes.append((call, "skipped: the user pressed Stop", ""))
-                continue
-            info = tools.describe(call)
-            yield _sse(dict(info, type="tool_call"))
-            if call["name"] not in permissions.KIND:
-                ok, output = tools.run(call)
-                status = "error"
-            else:
-                answer = yield from _permit(mode, call["name"], info)
-                if answer == "allow":
-                    ok, output = tools.run(call)
-                    status = "ok" if ok else "error"
+        results = {}
+        for l in lanes:
+            results[l] = outcomes = []
+            for call in calls[l]:
+                if _stop.is_set():
+                    outcomes.append((call, "skipped: the user pressed Stop", ""))
+                    continue
+                info = dict(tools[l].describe(call), model=l)
+                yield _sse(dict(info, type="tool_call"))
+                if call["name"] not in permissions.KIND:
+                    ok, output = tools[l].run(call)
+                    status = "error"
                 else:
-                    ok, output = False, ""
-                    status = ("blocked: plan mode is read-only" if mode == "plan" else "blocked by safety rules") \
-                        if answer == "blocked" else "denied by the user"
-            outcomes.append((call, status, output))
-            conv.setdefault("tools", []).append({"tool": call["name"], "summary": info.get("summary"),
-                                                 "diff": info.get("diff"), "ok": ok, "status": status})
-            yield _sse({"type": "tool_result", "tool": call["name"], "rel": info.get("rel"), "ok": ok,
-                        "status": status, "output": (output or "")[:4000]})
+                    answer = yield from _permit(mode, call["name"], info)
+                    if answer == "allow":
+                        ok, output = tools[l].run(call)
+                        status = "ok" if ok else "error"
+                    else:
+                        ok, output = False, ""
+                        status = ("blocked: plan mode is read-only" if mode == "plan" else "blocked by safety rules") \
+                            if answer == "blocked" else "denied by the user"
+                outcomes.append((call, status, output))
+                conv.setdefault("tools", []).append({"tool": call["name"], "summary": info.get("summary"), "lane": l,
+                                                     "diff": info.get("diff"), "ok": ok, "status": status})
+                yield _sse({"type": "tool_result", "model": l, "tool": call["name"], "rel": info.get("rel"), "ok": ok,
+                            "status": status, "output": (output or "")[:4000]})
         if _stop.is_set():
             break
         if rnd == agent.MAX_ROUNDS:
             yield _sse({"type": "notice", "text": f"Stopped after {agent.MAX_ROUNDS} tool rounds. Send 'continue' to keep going."})
             break
-        content = agent.format_results(outcomes)
-        total["a"] += "\n\n"
+        content = agent.format_lane_results(results) if dual else agent.format_results(results["a"])
+        for l in lanes:
+            total[l] += "\n\n"
         yield _sse({"type": "round", "n": rnd + 1})
     return total
 
@@ -947,19 +985,21 @@ def api_chat():
     ui_mode, ui_modality = _ui_mode, _ui_modality
     names = {"a": _model_name(model_a), "b": _model_name(model_b)}
     dual = mode in ("battle", "side-by-side")
+    # Once the user picks a folder, every text chat can use it, whatever the mode; Agent always can.
+    tools_on = ui_mode == "agent" or (_chosen_ws() is not None and modality in ("chat", "search"))
 
     def generate():
         _tl.error = None
         yield _sse({"type": "meta", "dual": dual, "mode": ui_mode, "modality": ui_modality,
                     "chat_id": conv["chat_id"], "permission_mode": _perm_mode(), "names": names})
-        if ui_mode == "agent":
+        if tools_on:
             out = yield from _agent_run(client, message, conv)
         else:
             out = yield from _turn(client, message, conv)
         out = out or {"a": "", "b": ""}
         client.eval_id = None if conv["new"] else conv["eval_id"]
-        reply = {"role": "assistant", "text": agent.strip_tool_calls(out["a"]) if ui_mode == "agent" else out["a"],
-                 "text_b": out["b"], "names": names}
+        clean = agent.strip_tool_calls if tools_on else str
+        reply = {"role": "assistant", "text": clean(out["a"]), "text_b": clean(out["b"]), "names": names}
         if conv["tools"]:
             reply["tools"] = conv["tools"]
         if not (out["a"] or out["b"]) and _tl.error:
@@ -1291,7 +1331,7 @@ def api_workspace_save():
     item = _last_webdev.get(key)
     if not item:
         return jsonify({"ok": False, "error": "No code files from this chat to save. Send a Code message first."}), 404
-    root = workspace.project_dir(key[0], item["title"], key[1])
+    root = workspace.project_dir(key[0], item["title"], key[1], base=_chosen_ws())
     plan = workspace.plan_project(root, item["files"])
     written, deleted = workspace.apply_project(plan)
     return jsonify({"ok": True, "root": str(root), "written": written, "deleted": deleted,

@@ -544,7 +544,7 @@ def test_agent_writes_file_in_accept_edits(web):
     assert (root / "hello.txt").read_text() == "hi\n"
     result = [e for e in ev if e["type"] == "tool_result"][0]
     assert result["ok"] and result["status"] == "ok"
-    assert "Task:\nmake hello" in sent[0][1]["userMessage"]["content"] and sent[0][1]["modelAId"] == "m1"
+    assert "User message:\nmake hello" in sent[0][1]["userMessage"]["content"] and sent[0][1]["modelAId"] == "m1"
     assert sent[1][1]["userMessage"]["content"].startswith("Tool results:") and "mode" not in sent[1][1]
 
 
@@ -697,4 +697,69 @@ def test_failed_reply_is_saved_with_its_error(web):
     ev = events(c.post("/api/chat", json={"message": "x"}))
     last = appmod._load_chat(ev[0]["chat_id"])["messages"][-1]
     assert last["role"] == "assistant" and last["text"] == "" and last.get("error")
+
+
+def test_two_model_tools_keep_each_copy_apart(tmp_path):
+    (tmp_path / "keep.txt").write_bytes(b"one\ntwo\n")
+    (tmp_path / "option-b").mkdir()
+    (tmp_path / "option-b" / "x.txt").write_text("start")
+    a = agent.LocalTools(tmp_path, tmp_path / agent.LANE_DIRS["a"])
+    ok, _ = a.run({"name": "write_file", "params": {"path": "help.py", "content": "start"}})
+    assert ok and (tmp_path / "option-a" / "help.py").read_text() == "start" and not (tmp_path / "help.py").exists()
+    info = a.describe({"name": "edit_file", "params": {"path": "keep.txt", "old_text": "two", "new_text": "2"}})
+    assert info["rel"] == "option-a/keep.txt" and "+2" in info["diff"]
+    ok, _ = a.run({"name": "edit_file", "params": {"path": "keep.txt", "old_text": "two", "new_text": "2"}})
+    assert ok and (tmp_path / "keep.txt").read_text() == "one\ntwo\n"
+    assert a.run({"name": "read_file", "params": {"path": "keep.txt"}})[1] == "one\n2\n"
+    listing = a.run({"name": "ls", "params": {"path": "."}})[1]
+    assert "help.py" in listing and "keep.txt" in listing and "option-" not in listing
+    found = a.run({"name": "search", "params": {"pattern": "start"}})[1]
+    assert "option-a/help.py" in found and "option-b" not in found
+
+
+def test_tool_tags_parse_without_quotes_and_strip_cleanly():
+    calls = agent.parse_tool_calls("<tool name=ls><path>.</path></tool>")
+    assert calls == [{"name": "ls", "params": {"path": "."}}]
+    assert agent.strip_tool_calls('ok ```xml\n<tool name="ls"><path>.</path></tool>\n``` done') == "ok  done"
+
+
+def test_battle_models_get_tools_once_a_folder_is_picked(web, tmp_path):
+    appmod, c, cfg, use, sent = web
+    cfg.update(permission_mode="acceptEdits", workspace_dir=str(tmp_path / "ws"))
+    call = '<tool name="write_file"><path>help.py</path><content>start this right now</content></tool>'
+    use(FakeResp([_tool_line(call), "b0:" + json.dumps(call.replace("start", "begin"))]),
+        FakeResp(['a0:"done"', 'b0:"done"']))
+    ev = events(c.post("/api/chat", json={"message": "Create help.py"}))
+    ws = tmp_path / "ws"
+    assert (ws / "option-a" / "help.py").read_text() == "start this right now"
+    assert (ws / "option-b" / "help.py").read_text() == "begin this right now"
+    assert "User message:\nCreate help.py" in sent[0][1]["userMessage"]["content"]
+    second = sent[1][1]["userMessage"]["content"]
+    assert second.startswith("Tool results for both replies") and "Reply A:" in second and "Reply B:" in second
+    assert sorted(e["model"] for e in ev if e["type"] == "tool_result") == ["a", "b"]
+    saved = appmod._load_chat(ev[0]["chat_id"])["messages"][-1]
+    assert "<tool" not in saved["text"] + saved["text_b"] and {t["lane"] for t in saved["tools"]} == {"a", "b"}
+
+
+def test_plain_chat_without_a_picked_folder_gets_no_tool_guide(web):
+    appmod, c, cfg, use, sent = web
+    use(FakeResp(['a0:"hi"', 'b0:"hello"']))
+    events(c.post("/api/chat", json={"message": "hi"}))
+    assert sent[0][1]["userMessage"]["content"] == "hi"
+
+
+def test_generated_media_is_saved_to_the_picked_folder(web, tmp_path, monkeypatch):
+    appmod, c, cfg, use, sent = web
+    cfg["workspace_dir"] = str(tmp_path / "ws")
+
+    class Got:
+        content, headers = b"PNG", {"content-type": "image/png"}
+
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(appmod.requests, "get", lambda url, timeout: Got())
+    out = list(appmod._save_media({"url": "https://cdn.example/img/cat.png", "kind": "image"}, "a", {"title": "A cat"}))
+    saved = list((tmp_path / "ws").glob("*-a-*.png"))
+    assert len(saved) == 1 and saved[0].read_bytes() == b"PNG" and "Saved to" in out[0]
 
