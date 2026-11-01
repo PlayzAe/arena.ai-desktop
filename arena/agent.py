@@ -15,8 +15,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-MAX_ROUNDS = 8
-OUTPUT_LIMIT = 6000
+OUTPUT_LIMIT = 40_000
 _TOOL_RE = re.compile(r"<tool\s+name\s*=\s*[\"']?([\w-]+)[\"']?\s*>(.*?)</tool\s*>", re.S | re.I)
 _EMPTY_FENCE = re.compile(r"```[\w-]*[ \t]*\n?\s*```")
 _PARAM_RE = re.compile(r"<([a-z_]+)>(.*?)</\1\s*>", re.S | re.I)

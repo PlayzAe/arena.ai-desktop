@@ -58,6 +58,8 @@ Every build is on the [releases page](https://github.com/PlayzAe/arena.ai-deskto
 - **Four modes:** Battle (two anonymous models, you vote A, B, tie or both bad), Direct (one model you pick), Side by Side (two models you pick) and Agent.
 - **Every modality:** Text, Code, Image, Video and Search, with model names on every reply.
 - **Chats you can reopen:** each chat keeps its own history and arena.ai conversation. A Stop button that really stops, and a thinking state while a model works.
+- **Multiple accounts:** click the account row at the bottom of the sidebar to add, switch or sign out of arena.ai accounts. Chats are kept per account.
+- **Live model list:** the picker refreshes from arena.ai's catalog, so new models appear and removed ones drop out without restarting.
 
 **Your files**
 

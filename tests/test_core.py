@@ -1,19 +1,22 @@
 """Unit, edge-case and route tests for the desktop core: contracts, permissions,
 agent tools, workspace mirroring, engine stream ordering and the Flask API."""
 
+import base64
 import json
 import queue
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from arena import agent, contracts, permissions, workspace  # noqa: E402
+from arena import accounts, agent, contracts, permissions, workspace  # noqa: E402
 from arena.api import generate_uuidv7  # noqa: E402
+from arena.auth import parse_cookie_input  # noqa: E402
 from arena.engine import BrowserEngine, EngineResponse  # noqa: E402
 
 KEY = "6LeTGMcsAAAAALuIlkVwIxaAuZA8VledA6d3Nnb0"
@@ -110,6 +113,7 @@ def test_line_splitter_handles_split_chunks():
     (403, "<title>Just a moment...</title>", "cloudflare"),
     (401, "", "auth"),
     (429, "", "rate_limit"),
+    (403, '{"error":"recaptcha rejected: too many requests"}', "rate_limit"),
     (400, '{"error":"Cannot pass model for battle mode"}', "bad_request"),
     (404, "", "eval_gone"),
     (500, "", "server"),
@@ -421,6 +425,8 @@ def web(tmp_path, monkeypatch):
     monkeypatch.setattr(appmod, "save_config", lambda c: cfg.update(c))
     monkeypatch.setattr(workspace, "PROJECTS_DIR", tmp_path / "projects")
     monkeypatch.setattr(appmod, "COOKIE_FILE", tmp_path / "cookies.txt")
+    monkeypatch.setattr(accounts, "ACCOUNTS_FILE", tmp_path / "accounts.json")
+    monkeypatch.setattr(accounts, "COOKIE_FILE", tmp_path / "accounts-cookies.txt")
     monkeypatch.setattr(appmod, "CHATS_DIR", tmp_path / "chats")
     monkeypatch.setattr(appmod.ENGINE, "window", None)
     monkeypatch.setattr(appmod, "_client", FakeClient())
@@ -474,6 +480,186 @@ def test_status_without_engine(web):
     assert s["permission_mode"] == "default" and s["workspace"].endswith("workspace")
 
 
+def _session_cookie(email, user_id, token):
+    payload = {"user": {"id": user_id, "email": email, "user_metadata": {}}, "access_token": token}
+    return "arena-auth-prod-v1.0=base64-" + base64.b64encode(json.dumps(payload).encode()).decode()
+
+
+def _fake_arena(monkeypatch, appmod):
+    class FakeArena:
+        def __init__(self, cookie_str=None):
+            self.cookie_str = cookie_str
+            self.eval_id = None
+            self.sources = []
+            self.active_mode = "battle"
+            self.active_modality = "chat"
+
+        def get_me(self):
+            info = parse_cookie_input(self.cookie_str or "")[2] or {}
+            return ({"email": info.get("email")}, None) if info.get("email") else (None, "bad session")
+
+        def sync_cookies(self):
+            pass
+
+    monkeypatch.setattr(appmod, "ArenaClient", FakeArena)
+
+
+def test_accounts_switch_route_and_chat_scoping(web, monkeypatch):
+    appmod, c, cfg, *_ = web
+    _fake_arena(monkeypatch, appmod)
+    a_cookie = _session_cookie("a@example.com", "ua", "ta")
+    b_cookie = _session_cookie("b@example.com", "ub", "tb")
+    accounts.remember(a_cookie)
+    chat_a = str(uuid.uuid4())
+    appmod._save_chat(chat_a, "A chat", [], mode="battle", modality="auto")
+    accounts.remember(b_cookie)
+    chat_b = str(uuid.uuid4())
+    appmod._save_chat(chat_b, "B chat", [], mode="battle", modality="auto")
+
+    listed = c.get("/api/accounts").get_json()
+    assert [a["email"] for a in listed["accounts"]] == ["a@example.com", "b@example.com"]
+    assert all("cookie" not in a for a in listed["accounts"])
+    assert [x["id"] for x in appmod._list_chats()] == [chat_b]
+    assert c.get(f"/api/chats/{chat_a}").status_code == 404
+
+    a_id = next(a["id"] for a in listed["accounts"] if a["email"] == "a@example.com")
+    r = c.post("/api/accounts/switch", json={"id": a_id})
+    assert r.status_code == 200 and r.get_json()["ok"]
+    assert accounts.active_account()["email"] == "a@example.com"
+    assert [x["id"] for x in appmod._list_chats()] == [chat_a]
+    assert c.get(f"/api/chats/{chat_a}").status_code == 200
+
+
+def test_login_with_a_second_cookie_adds_an_account(web, monkeypatch):
+    appmod, c, *_ = web
+    _fake_arena(monkeypatch, appmod)
+    a_cookie = _session_cookie("a@example.com", "ua", "ta")
+    b_cookie = _session_cookie("b@example.com", "ub", "tb")
+    accounts.remember(a_cookie)
+    r = c.post("/api/login", json={"method": "manual", "cookie": b_cookie})
+    assert r.status_code == 200 and r.get_json()["email"] == "b@example.com"
+    assert [a["email"] for a in accounts.list_accounts()] == ["a@example.com", "b@example.com"]
+    assert accounts.active_account()["email"] == "b@example.com"
+
+
+def test_account_switch_imports_the_cookie_into_the_engine(web, monkeypatch):
+    appmod, c, *_ = web
+    a_cookie = _session_cookie("a@example.com", "ua", "ta")
+    b_cookie = _session_cookie("b@example.com", "ub", "tb")
+    accounts.remember(a_cookie)
+    accounts.remember(b_cookie)
+
+    class FakeEngine:
+        window = object()
+        challenge = None
+        imported = []
+
+        def import_cookies(self, cookie):
+            self.imported.append(cookie)
+            return True
+
+        def wait_ready(self, timeout):
+            return True
+
+        def get_me(self):
+            info = parse_cookie_input(self.imported[-1] if self.imported else "")[2] or {}
+            return {"email": info.get("email")}, None
+
+        def sync_to(self, client):
+            pass
+
+    eng = FakeEngine()
+    monkeypatch.setattr(appmod, "ENGINE", eng)
+    _fake_arena(monkeypatch, appmod)
+    a_id = next(a["id"] for a in accounts.list_accounts() if a["email"] == "a@example.com")
+    r = c.post("/api/accounts/switch", json={"id": a_id})
+    assert r.status_code == 200 and r.get_json()["ok"]
+    assert eng.imported[-1] == a_cookie
+    assert accounts.active_account()["email"] == "a@example.com"
+
+
+def test_account_switch_rejects_a_different_engine_session(web, monkeypatch):
+    appmod, c, *_ = web
+    a_cookie = _session_cookie("a@example.com", "ua", "ta")
+    b_cookie = _session_cookie("b@example.com", "ub", "tb")
+    accounts.remember(a_cookie)
+    a_id = accounts.active_id()
+    accounts.remember(b_cookie)
+    accounts.set_active(a_id)
+
+    class StuckEngine:
+        window = object()
+        challenge = None
+        imported = []
+
+        def import_cookies(self, cookie):
+            self.imported.append(cookie)
+            return True
+
+        def wait_ready(self, timeout):
+            return True
+
+        def get_me(self):
+            return {"email": "a@example.com"}, None
+
+        def sync_to(self, client):
+            pass
+
+    eng = StuckEngine()
+    monkeypatch.setattr(appmod, "ENGINE", eng)
+    _fake_arena(monkeypatch, appmod)
+    b_id = next(a["id"] for a in accounts.list_accounts() if a["email"] == "b@example.com")
+    r = c.post("/api/accounts/switch", json={"id": b_id})
+    assert r.status_code == 401
+    assert accounts.active_id() == a_id
+    assert eng.imported[-1] == a_cookie  # it put the previous session back
+
+
+def test_logout_switches_to_the_next_saved_account(web, monkeypatch):
+    appmod, c, *_ = web
+    _fake_arena(monkeypatch, appmod)
+    a_cookie = _session_cookie("a@example.com", "ua", "ta")
+    b_cookie = _session_cookie("b@example.com", "ub", "tb")
+    accounts.remember(a_cookie)
+    accounts.remember(b_cookie)
+
+    r = c.post("/api/logout", json={})
+    data = r.get_json()
+    a_id = next(a["id"] for a in accounts.list_accounts() if a["email"] == "a@example.com")
+    assert r.status_code == 200 and data["active"] == a_id and data["switched_to"] == "a@example.com"
+    assert [a["email"] for a in accounts.list_accounts()] == ["a@example.com"] and accounts.active_id() == a_id
+
+    r = c.post("/api/logout", json={})
+    assert r.status_code == 200 and r.get_json()["active"] is None
+    assert accounts.list_accounts() == []
+
+
+def test_models_refresh_query_forces_the_catalog(web, monkeypatch):
+    appmod, c, *_ = web
+    calls = []
+
+    def fake_models(force=False):
+        calls.append(force)
+        return []
+
+    monkeypatch.setattr(appmod, "sync_models", fake_models)
+    assert c.get("/api/models?modality=chat").status_code == 200
+    assert calls[-1] is False
+    assert c.get("/api/models?modality=chat&refresh=1").status_code == 200
+    assert calls[-1] is True
+
+
+def test_agent_mode_is_auto_only(web):
+    appmod, c, *_ = web
+    r = c.post("/api/mode", json={"mode": "agent"}).get_json()
+    assert r["mode"] == "agent" and r["modality"] == "auto"
+    assert appmod._ui_modality == "auto"
+    assert c.post("/api/modality", json={"modality": "video"}).status_code == 400
+    assert c.post("/api/modality", json={"modality": "auto"}).status_code == 200
+    c.post("/api/mode", json={"mode": "direct"})
+    assert c.post("/api/modality", json={"modality": "video"}).get_json()["modality"] == "video"
+
+
 def test_permission_mode_and_answers(web):
     _, c, cfg, *_ = web
     assert c.post("/api/permission-mode", json={"mode": "bogus"}).status_code == 400
@@ -494,6 +680,88 @@ def test_chat_validation(web):
     assert c.post("/api/chat", json={"message": "hi", "model_id": "m"}).status_code == 401
 
 
+def test_file_only_message_is_allowed(web):
+    appmod, c, _, use, sent = web
+    use(FakeResp(['a0:"seen"']))
+    ev = events(c.post("/api/chat", json={"message": "", "attachments": [
+        {"name": "shot.png", "contentType": "image/png", "url": "https://cdn.example/x.png"}]}))
+    assert ev[-1]["type"] == "done"
+    assert sent[0][1]["userMessage"]["experimental_attachments"][0]["name"] == "shot.png"
+    assert appmod._load_chat(ev[0]["chat_id"])["title"] == "shot.png"
+
+
+def test_chat_forwards_clean_attachments(web):
+    _, c, _, use, sent = web
+    use(FakeResp(['a0:"ok"']))
+    events(c.post("/api/chat", json={"message": "look", "attachments": [
+        {"name": "shot.png", "contentType": "image/png", "url": "https://cdn.example/x.png", "evil": "drop me"},
+        {"name": "local.png", "contentType": "image/png", "url": "http://127.0.0.1/x.png"},
+        {"name": "bad.txt", "contentType": "text/plain", "url": "javascript:alert(1)"},
+        "not-a-dict",
+    ]}))
+    assert sent[0][1]["userMessage"]["experimental_attachments"] == [
+        {"name": "shot.png", "contentType": "image/png", "url": "https://cdn.example/x.png"},
+        {"name": "local.png", "contentType": "image/png", "url": "http://127.0.0.1/x.png"}]
+
+
+def test_upload_route_inlines_text_and_uploads_binary(web, monkeypatch):
+    appmod, c, *_ = web
+    json_calls, puts = [], []
+
+    def fake_json(client, path, payload, timeout=60):
+        json_calls.append((path, payload))
+        if path == contracts.PATHS["storage_upload"]:
+            return {"uploadUrl": "https://upload.example/abc", "key": "/files/abc.png"}
+        if path == contracts.PATHS["storage_signed"]:
+            return {"url": "https://cdn.example/files/abc.png"}
+        raise AssertionError(path)
+
+    class Put:
+        ok, status_code = True, 200
+
+    monkeypatch.setattr(appmod, "_arena_json", fake_json)
+    monkeypatch.setattr(appmod.requests, "put",
+                        lambda url, data=None, headers=None, **kw: puts.append((url, data, headers)) or Put())
+    r = c.post("/api/upload", json={"files": [
+        {"name": "notes.txt", "type": "text/plain", "data": "hello", "binary": False},
+        {"name": "tricky.txt", "type": "text/plain", "data": "data:not-a-url,hello", "binary": False},
+        {"name": "shot.png", "type": "image/png", "data": "data:image/png;base64,iVBORw0KGgo=", "binary": True},
+    ]})
+    assert r.status_code == 200
+    files = r.get_json()["files"]
+    assert files[0]["text"] == "hello" and "attachment" not in files[0]
+    assert files[1]["text"] == "data:not-a-url,hello"
+    assert files[2]["attachment"] == {
+        "name": "shot.png", "contentType": "image/png", "url": "https://cdn.example/files/abc.png"}
+    assert json_calls == [
+        (contracts.PATHS["storage_upload"], {"fileName": "shot.png", "contentType": "image/png"}),
+        (contracts.PATHS["storage_signed"], {"key": "files/abc.png"}),
+    ]
+    assert puts[0][0] == "https://upload.example/abc" and puts[0][1].startswith(b"\x89PNG")
+    assert puts[0][2] == {"Content-Type": "image/png"}
+
+
+def test_upload_route_reads_native_files_and_rejects_big_ones(web, monkeypatch, tmp_path):
+    appmod, c, *_ = web
+    native = tmp_path / "notes.md"
+    native.write_text("# hi")
+    monkeypatch.setattr(appmod, "_arena_upload", lambda client, name, ctype, blob: {
+        "name": name, "contentType": ctype, "url": "https://cdn.example/" + name})
+    r = c.post("/api/upload", json={"files": [{"name": "notes.md", "path": str(native), "size": 0}]})
+    assert r.status_code == 200 and r.get_json()["files"][0]["text"] == "# hi"
+    big = tmp_path / "big.bin"
+    big.write_bytes(b"x" * (appmod.ATTACHMENT_MAX_BYTES + 1))
+    r = c.post("/api/upload", json={"files": [{"name": "big.bin", "path": str(big)}]})
+    assert r.status_code == 400 and "15 MB" in r.get_json()["error"]
+
+
+def test_upload_route_needs_a_session(web):
+    appmod, c, *_ = web
+    appmod._client.cookie_str = None
+    assert c.post("/api/upload", json={"files": [{"name": "a.txt", "data": "x"}]}).status_code == 401
+    assert c.post("/api/upload", json={}).status_code == 400
+
+
 def test_battle_chat_streams_both_lanes_and_saves(web):
     appmod, c, _, use, sent = web
     use(FakeResp(['a0:"Hello "', 'b0:"Hi"', 'a0:"there"', 'ad:{"finishReason":"stop"}']))
@@ -507,6 +775,21 @@ def test_battle_chat_streams_both_lanes_and_saves(web):
     use(FakeResp(['a0:"again"']))
     events(c.post("/api/chat", json={"message": "more", "chat_id": ev[0]["chat_id"]}))
     assert sent[1][0] == contracts.PATHS["post"].format(eval_id=body["id"]) and "mode" not in sent[1][1]
+
+
+def test_direct_video_sends_video_modality_and_emits_media(web):
+    appmod, c, _, use, sent = web
+    appmod._ui_mode = "direct"
+    appmod._ui_modality = "video"
+    use(FakeResp(['a2:' + json.dumps([
+        {"type": "video", "url": "https://cdn.example/clip.mp4", "mimeType": "video/mp4"}
+    ])]))
+    ev = events(c.post("/api/chat", json={"message": "make a clip", "model_id": "video-model"}))
+    assert sent[0][1]["modality"] == "video"
+    assert sent[0][1]["modelAId"] == "video-model"
+    media = [e for e in ev if e["type"] == "media"]
+    assert media and media[0]["kind"] == "video"
+    assert media[0]["url"] == "https://cdn.example/clip.mp4"
 
 
 def test_challenge_without_engine_explains(web):
@@ -578,6 +861,42 @@ def test_agent_asks_and_user_denies(web):
     assert (root / "keep.txt").exists()
     assert any(e["type"] == "permission" for e in ev)
     assert [e for e in ev if e["type"] == "tool_result"][0]["status"] == "denied by the user"
+
+
+def test_agent_has_no_tool_round_cap(web):
+    appmod, c, cfg, use, sent = web
+    cfg["permission_mode"] = "acceptEdits"
+    appmod._ui_mode = "agent"
+    rounds = [FakeResp([_tool_line(f'<tool name="write_file"><path>f{i}.txt</path><content>{i}</content></tool>')])
+              for i in range(12)]
+    use(*rounds, FakeResp(['a0:"All done."']))
+    ev = events(c.post("/api/chat", json={"message": "write twelve files", "model_id": "m1"}))
+    root = workspace.PROJECTS_DIR / "workspace"
+    assert all((root / f"f{i}.txt").read_text() == str(i) for i in range(12))
+    assert len([e for e in ev if e["type"] == "tool_result"]) == 12
+    assert not any("Stopped after" in (e.get("text") or "") for e in ev)
+    assert ev[-1]["type"] == "done" and "All done." in ev[-1]["text_a"]
+
+
+def test_agent_resumes_after_rate_limit(web, monkeypatch):
+    appmod, c, cfg, use, sent = web
+    cfg["permission_mode"] = "acceptEdits"
+    appmod._ui_mode = "agent"
+    monkeypatch.setattr(appmod.time, "sleep", lambda seconds: None)  # the real wait is 60s
+    use(FakeResp([_tool_line('<tool name="write_file"><path>ok.txt</path><content>yes</content></tool>')]),
+        FakeResp(status=429, text="slow down"),
+        FakeResp(['a0:"Finished after the limit."']))
+    ev = events(c.post("/api/chat", json={"message": "write ok.txt", "model_id": "m1"}))
+    assert (workspace.PROJECTS_DIR / "workspace" / "ok.txt").read_text() == "yes"
+    assert any(e["type"] == "notice" and "rate-limited" in (e.get("text") or "") for e in ev)
+    assert ev[-1]["type"] == "done" and "Finished after the limit." in ev[-1]["text_a"]
+    assert len(sent) == 3
+
+
+def test_tool_results_keep_the_full_read(web):
+    output = "x" * 30_000
+    lines = agent._result_lines([({"name": "read_file", "params": {"path": "big.txt"}}, "ok", output)])
+    assert len(lines[1]) == len(output)
 
 
 def _webdev_line(lane, content):
