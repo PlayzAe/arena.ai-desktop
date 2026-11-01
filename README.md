@@ -7,15 +7,15 @@
 <p align="center"><b>An unofficial desktop app for arena.ai. Chat with 400+ AI models, battle them, and let them work on the files on your PC.</b><br/>One window, like Claude Desktop: arena.ai runs inside the app.</p>
 
 <p align="center">
-  <a href="https://github.com/PlayzAe/arena.ai-cli/releases/latest">Download</a> |
+  <a href="https://github.com/PlayzAe/arena.ai-desktop/releases/latest">Download</a> |
   <a href="https://arena.ai">arena.ai</a> |
-  <a href="https://github.com/PlayzAe/arena.ai-cli/issues">Report a bug</a> |
+  <a href="https://github.com/PlayzAe/arena.ai-desktop/issues">Report a bug</a> |
   <a href="#help-wanted-macos-and-linux">Help wanted</a>
 </p>
 
 <div align="center">
-  <a href="https://github.com/PlayzAe/arena.ai-cli/stargazers"><img src="https://img.shields.io/github/stars/PlayzAe/arena.ai-cli?style=flat-square&color=crimson" alt="GitHub stars" /></a>
-  <a href="https://github.com/PlayzAe/arena.ai-cli/releases/latest"><img src="https://img.shields.io/github/v/release/PlayzAe/arena.ai-cli?style=flat-square" alt="Latest release" /></a>
+  <a href="https://github.com/PlayzAe/arena.ai-desktop/stargazers"><img src="https://img.shields.io/github/stars/PlayzAe/arena.ai-desktop?style=flat-square&color=crimson" alt="GitHub stars" /></a>
+  <a href="https://github.com/PlayzAe/arena.ai-desktop/releases/latest"><img src="https://img.shields.io/github/v/release/PlayzAe/arena.ai-desktop?style=flat-square" alt="Latest release" /></a>
   <img src="https://img.shields.io/badge/models-400%2B-10B981?style=flat-square" alt="400+ models" />
   <img src="https://img.shields.io/badge/Platform-Windows-blue?style=flat-square" alt="Platform" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="MIT license" /></a>
@@ -43,7 +43,7 @@
 
 ## Download
 
-Every build is on the [releases page](https://github.com/PlayzAe/arena.ai-cli/releases/latest).
+Every build is on the [releases page](https://github.com/PlayzAe/arena.ai-desktop/releases/latest).
 
 | Platform | File | Notes |
 | --- | --- | --- |
@@ -84,7 +84,7 @@ Every build is on the [releases page](https://github.com/PlayzAe/arena.ai-cli/re
 ## Repository layout
 
 ```
-arena.ai-cli/
+arena.ai-desktop/
 ├─ arena/
 │  ├─ desktop.py       Desktop app: windows, docking the arena.ai pane, startup and close
 │  ├─ engine.py        The arena.ai page: sending, streaming, human checks
