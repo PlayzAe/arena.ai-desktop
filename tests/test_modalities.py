@@ -67,6 +67,17 @@ class TestModalities(unittest.TestCase):
                 "capabilities": {
                     "outputCapabilities": {"image": True}
                 }
+            },
+            {
+                "id": "model-video-1",
+                "name": "Veo Video",
+                "org": "google",
+                "arena": "text-to-video",
+                "rank": 3,
+                "user_selectable": True,
+                "capabilities": {
+                    "outputCapabilities": {"video": True}
+                }
             }
         ]
 
@@ -75,10 +86,12 @@ class TestModalities(unittest.TestCase):
         self.assertIn("webdev", MODALITIES)
         self.assertIn("search", MODALITIES)
         self.assertIn("image", MODALITIES)
+        self.assertIn("video", MODALITIES)
 
         self.assertEqual(MODALITIES["webdev"]["api_modality"], "webdev")
         self.assertEqual(MODALITIES["search"]["api_modality"], "search")
         self.assertEqual(MODALITIES["image"]["api_modality"], "image")
+        self.assertEqual(MODALITIES["video"]["api_modality"], "video")
         self.assertEqual(MODALITIES["chat"]["api_modality"], "chat")
 
     def test_get_models_for_modality(self):
@@ -96,6 +109,12 @@ class TestModalities(unittest.TestCase):
         self.assertIn("model-webdev-1", web_ids)
         self.assertNotIn("model-image-1", web_ids)
 
+        # Video must use the video arena/capabilities, never the image list
+        video_models = get_models_for_modality(self.mock_models, "video")
+        video_ids = [m["id"] for m in video_models]
+        self.assertIn("model-video-1", video_ids)
+        self.assertNotIn("model-image-1", video_ids)
+
     def test_check_model_capability(self):
         router = self.mock_models[0]
         web_model = self.mock_models[1]
@@ -111,6 +130,8 @@ class TestModalities(unittest.TestCase):
         # Dedicated models
         self.assertTrue(check_model_capability(web_model, "webdev"))
         self.assertTrue(check_model_capability(search_model, "search"))
+        self.assertTrue(check_model_capability(self.mock_models[5], "video"))
+        self.assertFalse(check_model_capability(self.mock_models[4], "video"))
 
         # Text-only model cannot handle search
         self.assertFalse(check_model_capability(text_model, "search"))

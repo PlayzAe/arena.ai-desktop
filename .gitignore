@@ -11,3 +11,6 @@ data/
 .claude/
 .pytest_cache/
 .code-review-graph/
+option-a/
+option-b/
+previews/

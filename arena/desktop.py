@@ -49,6 +49,7 @@ class JsBridge:
 
     def __init__(self):
         self._window = None
+        self._titlebar = None
 
     def open_file_dialog(self, file_types=None):
         ft = tuple(file_types or ()) + ("All files (*.*)",)
@@ -64,6 +65,19 @@ class JsBridge:
     def choose_folder(self):
         result = self._window.create_file_dialog(_dialog("FOLDER"))
         return (result[0] if result else None) if isinstance(result, (list, tuple)) else result
+
+    # ── custom title bar (the window is frameless) ──
+    def tb_minimize(self):
+        if self._titlebar:
+            self._titlebar.minimize()
+
+    def tb_toggle_maximize(self):
+        if self._titlebar:
+            self._titlebar.toggle_maximize()
+
+    def tb_close(self):
+        if self._titlebar:
+            self._titlebar.close()
 
 
 def _user32():
@@ -82,6 +96,47 @@ def _user32():
     u.GetClientRect.argtypes = [w.HWND, ctypes.POINTER(w.RECT)]
     u.SetWindowPos.argtypes = [w.HWND, w.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, w.UINT]
     return u
+
+
+class TitleBar:
+    """Custom title bar for the frameless window: the page draws drag space and
+    min/max/close buttons (like VS Code), and calls back into this class."""
+
+    def __init__(self):
+        self._window = None
+        self._maximized = False
+
+    def bind(self, window):
+        self._window = window
+
+    def notify(self):
+        if self._window:
+            self._window.evaluate_js("window.titlebarState && titlebarState(%s)" % ("true" if self._maximized else "false"))
+
+    def on_maximized(self, state: bool):
+        self._maximized = state
+        self.notify()
+
+    def minimize(self):
+        try:
+            self._window.minimize()
+        except Exception:
+            logging.getLogger("arena.desktop").exception("titlebar minimize failed")
+
+    def toggle_maximize(self):
+        try:
+            if self._maximized:
+                self._window.restore()
+            else:
+                self._window.maximize()
+        except Exception:
+            logging.getLogger("arena.desktop").exception("titlebar toggle_maximize failed")
+
+    def close(self):
+        try:
+            self._window.destroy()
+        except Exception:
+            logging.getLogger("arena.desktop").exception("titlebar close failed")
 
 
 class Dock:
@@ -215,9 +270,17 @@ def main():
 
     webview.settings["ALLOW_DOWNLOADS"] = True  # zip and media downloads from the UI
     bridge = JsBridge()
+    # Frameless window with a page-drawn title bar (drag space + min/max/close), like VS Code,
+    # so the app owns the whole window height. easy_drag off: the drag area is our own.
     main_win = webview.create_window("Arena Desktop", f"http://127.0.0.1:{port}", width=1280, height=840,
-                                     min_size=(860, 600), background_color="#242422", text_select=True, js_api=bridge)
+                                     min_size=(860, 600), background_color="#242422", text_select=True, js_api=bridge,
+                                     frameless=True, easy_drag=False)
     bridge._window = main_win
+    titlebar = TitleBar()
+    titlebar.bind(main_win)
+    bridge._titlebar = titlebar
+    main_win.events.maximized += lambda *a: titlebar.on_maximized(True)
+    main_win.events.restored += lambda *a: titlebar.on_maximized(False)
     engine_win = webview.create_window("arena.ai - Arena Desktop", contracts.ORIGIN, width=1000, height=760, x=120, y=120,
                                        hidden=True, background_color="#242422", js_api=ENGINE.bridge())
     ENGINE.attach(engine_win, main_win)

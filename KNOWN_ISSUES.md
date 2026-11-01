@@ -15,6 +15,15 @@ Things that are broken or unfinished in Arena Desktop. Fixes and pull requests a
 - Switching models inside a chat now keeps the same arena.ai conversation, like arena's own follow-up box. Not tested live yet; if arena.ai refuses it, the app starts a new conversation.
 - Some models (seen with glm-5.3-flash and in Battle) use arena.ai's built-in tools instead of the app's file tools. Their file writes are copied from the stream into your folder; reads of your local files still need the app's tools.
 
+## Accounts
+
+- Adding a second account uses the browser-cookie flow (paste or auto-detect); the embedded arena.ai pane holds one session at a time, so it cannot host two signed-in accounts simultaneously.
+- Removing an account forgets its saved session locally; its chats stay on disk and come back if the same account is added again.
+
+## Models
+
+- The model picker refreshes from arena.ai's catalog every few minutes. If that endpoint is unreachable, the last cached list stays until it can be refreshed.
+
 ## Testing
 
 - The live test scripts close `arena-ai.exe` and change the shared folder setting while they run. Close the app before running them.

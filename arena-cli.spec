@@ -18,6 +18,7 @@ a = Analysis(
     hiddenimports=[
         'arena',
         'arena.cli',
+        'arena.accounts',
         'arena.api',
         'arena.auth',
         'arena.config',

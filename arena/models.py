@@ -18,7 +18,7 @@ from arena.console import con
 from arena.config import BASE_URL, API_PREFIX, CONFIG_DIR, load_config, save_config
 
 CACHE_FILE = CONFIG_DIR / "models_cache.json"
-CACHE_TTL_SECONDS = 3600  # 1 hour cache TTL
+CACHE_TTL_SECONDS = 300  # models are added/removed often; revalidate every 5 minutes
 
 # Special Router Model ID
 MAX_ROUTER_ID = "019b24bb-5caf-71c3-b854-37d0c7086f21"
@@ -226,6 +226,10 @@ def get_models_for_modality(all_models: List[Dict[str, Any]], modality: str = "c
         elif modality == "webdev" and m.get("capabilities", {}).get("outputCapabilities", {}).get("web"):
             seen_ids.add(m["id"])
             matches.append(m)
+        # Video capability check (catalog usually tags these as text-to-video already)
+        elif modality == "video" and m.get("capabilities", {}).get("outputCapabilities", {}).get("video"):
+            seen_ids.add(m["id"])
+            matches.append(m)
 
     # Sort: Router first, then by rank, then name
     return sorted(matches, key=lambda x: (not x.get("is_router"), x.get("rank") is None, x.get("rank", 9999), x.get("name", "")))
@@ -246,6 +250,8 @@ def check_model_capability(model: Dict[str, Any], modality: str) -> bool:
     if modality == "webdev" and caps.get("web"):
         return True
     if modality == "image" and ("image" in caps or model.get("arena") == "text-to-image"):
+        return True
+    if modality == "video" and ("video" in caps or model.get("arena") == "text-to-video"):
         return True
 
     return False

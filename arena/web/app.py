@@ -28,7 +28,6 @@ from arena.config import (
     BASE_URL,
     CHATS_DIR,
     COOKIE_FILE,
-    ensure_config_dir,
     load_config,
     save_config,
 )
@@ -162,7 +161,7 @@ def _find_preview_url(val):
     return None
 
 
-from arena import agent, contracts, permissions, workspace
+from arena import accounts, agent, contracts, permissions, workspace
 from arena.api import generate_uuidv7
 from arena.auth import get_clipboard_text
 from arena.engine import ENGINE
@@ -218,11 +217,13 @@ def _save_chat(chat_id: str, title: str, messages: list,
         "title": title,
         "created_at": existing.get("created_at", now),
         "updated_at": now,
+        "account_id": existing.get("account_id") or _active_account_id(),
         "mode": mode,
         "modality": modality,
         "model_a": model_a,
         "model_b": model_b,
         "eval_id": eval_id,
+        "pinned": bool(existing.get("pinned")),
         "messages": messages,
     }
     chat_file.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -240,9 +241,27 @@ def _load_chat(chat_id: str) -> Optional[dict]:
         return None
 
 
+def _chat_owned_by_active(data: dict) -> bool:
+    active = _active_account_id()
+    if not active:
+        return True
+    owner = data.get("account_id")
+    if not owner:
+        try:
+            owner = accounts.first_id()
+        except Exception:
+            owner = None
+    return owner == active
+
+
 def _list_chats() -> list:
     if not CHATS_DIR.exists():
         return []
+    active = _active_account_id()
+    try:
+        legacy = accounts.first_id() if active else None
+    except Exception:
+        legacy = None
     chats = []
     for d in CHATS_DIR.iterdir():
         if not d.is_dir():
@@ -252,22 +271,36 @@ def _list_chats() -> list:
             continue
         try:
             data = json.loads(f.read_text(encoding="utf-8"))
+            owner = data.get("account_id")
+            if not owner and legacy:  # chats from before accounts existed belong to the original account
+                owner = data["account_id"] = legacy
+                try:
+                    f.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+                except OSError:
+                    pass
+            if active and owner != active:
+                continue
             chats.append({
                 "id": data.get("id", d.name),
                 "title": data.get("title", "Untitled"),
                 "updated_at": data.get("updated_at", ""),
                 "mode": data.get("mode"),
                 "modality": data.get("modality"),
+                "pinned": bool(data.get("pinned")),
                 "message_count": len(data.get("messages", [])),
             })
         except Exception:
             pass
-    chats.sort(key=lambda c: c.get("updated_at", ""), reverse=True)
+    chats.sort(key=lambda c: str(c.get("updated_at") or ""), reverse=True)
+    chats.sort(key=lambda c: not c.get("pinned"))  # pinned chats first, newest first inside each group
     return chats
 
 
 def _delete_chat(chat_id: str) -> bool:
     if not _validate_chat_id(chat_id):
+        return False
+    data = _load_chat(chat_id)
+    if data and not _chat_owned_by_active(data):
         return False
     chat_dir = CHATS_DIR / chat_id
     if chat_dir.exists() and chat_dir.is_dir():
@@ -280,10 +313,34 @@ def get_client() -> ArenaClient:
     global _client
     if _client is None:
         cookie_str = None
-        if COOKIE_FILE.exists():
+        try:
+            cookie_str = accounts.active_cookie()
+        except Exception:
+            cookie_str = None
+        if not cookie_str and COOKIE_FILE.exists():
             cookie_str = COOKIE_FILE.read_text(encoding="utf-8").strip()
         _client = ArenaClient(cookie_str=cookie_str)
     return _client
+
+
+def _active_account_id():
+    try:
+        return accounts.active_id()
+    except Exception:
+        return None
+
+
+def _reset_conversation(client=None) -> None:
+    """A new account must not continue the previous account's arena conversation."""
+    global _current_chat_id, _conversation_history
+    _current_chat_id = None
+    _conversation_history = []
+    client = client or get_client()
+    client.eval_id = None
+    try:
+        client.sources.clear()
+    except Exception:
+        pass
 
 
 # ---------- Static serving ----------
@@ -296,6 +353,16 @@ def index():
 # ---------- API routes ----------
 
 _me_cache = {"t": 0.0, "user": None, "err": None}
+_engine_restore = {"t": 0.0}
+
+
+def _restore_engine_session(cookie: str) -> None:
+    """Put the saved active account back into the embedded page after a missing/expired session."""
+    now = time.time()
+    if not cookie or now - _engine_restore["t"] < 20:
+        return
+    _engine_restore["t"] = now
+    threading.Thread(target=ENGINE.import_cookies, args=(cookie,), daemon=True).start()
 
 
 def _engine_on() -> bool:
@@ -306,14 +373,33 @@ def _perm_mode() -> str:
     return permissions.normalize(load_config().get("permission_mode"))
 
 
+def _remember_session(client: ArenaClient, user: dict) -> None:
+    """Save rotated cookies for the active account; never overwrite it with a different arena session."""
+    if not user or not client.cookie_str:
+        return
+    try:
+        active = accounts.active_account() or {}
+        saved_email = (active.get("email") or "").casefold()
+        live_email = (user.get("email") or "").casefold()
+        if saved_email and live_email and saved_email != live_email:
+            LOG.warning("engine is signed in as %s while the active account is %s", live_email, saved_email)
+            return
+        accounts.update_active(client.cookie_str, user)
+    except Exception:
+        pass
+
+
 def _get_me(client: ArenaClient):
     """Ask arena.ai who is signed in. In the desktop app only the engine uses the session:
     Supabase revokes a refresh token that two clients keep rotating."""
     if _engine_on():
         user, err = ENGINE.get_me()
         ENGINE.sync_to(client)
+        _remember_session(client, user)
         return user, err
-    return client.get_me()
+    user, err = client.get_me()
+    _remember_session(client, user)
+    return user, err
 
 
 def _check_session(client: ArenaClient, force: bool = False):
@@ -346,6 +432,10 @@ def api_status():
         # arena.ai is still loading or waiting on a check; answer now, the UI polls again
         out.update(ident, loading=True, authenticated=bool(client.cookie_str))
         return jsonify(out)
+    if _engine_on() and ENGINE.ready() and client.cookie_str and not ENGINE.has_session():
+        _restore_engine_session(client.cookie_str)
+        out.update(ident, loading=True, authenticated=True)
+        return jsonify(out)
     if not _signed_in_somewhere(client):
         return jsonify(out)
     user, err = _check_session(client, force=request.args.get("refresh") == "1")
@@ -362,23 +452,40 @@ def api_status():
 def _activate_cookie(cookie_str: str, method: str):
     """Adopt a cookie only after arena.ai confirms the session; returns (response, ok)."""
     global _client
+    previous = accounts.active_account()
+    previous_cookie = (previous or {}).get("cookie")
     candidate = ArenaClient(cookie_str=cookie_str)
+    expected = ((parse_cookie_input(cookie_str)[2] or {}).get("email") or "").casefold()
     if _engine_on():
         if not ENGINE.import_cookies(cookie_str):
             return jsonify({"ok": False, "error": "No arena-auth-prod-v1 cookie found in that text."}), False
         if not ENGINE.wait_ready(45):
             hint = f" It is waiting for a {ENGINE.challenge} check: press Show arena.ai." if ENGINE.challenge else ""
+            if previous_cookie:
+                ENGINE.import_cookies(previous_cookie)
+                ENGINE.wait_ready(30)
             return jsonify({"ok": False, "error": "arena.ai did not finish loading." + hint + " Try again in a moment."}), False
         user, err = ENGINE.get_me()
+        live = (user.get("email") or "").casefold() if user else ""
+        if user and expected and live and live != expected:
+            err = f"arena.ai stayed signed in as {user.get('email')} instead of the selected account"
+            user = None
         if user:
             ENGINE.sync_to(candidate)
+        elif previous_cookie:
+            ENGINE.import_cookies(previous_cookie)
+            ENGINE.wait_ready(30)
     else:
         user, err = candidate.get_me()
+        live = (user.get("email") or "").casefold() if user else ""
+        if user and expected and live and live != expected:
+            err = f"arena.ai stayed signed in as {user.get('email')} instead of the selected account"
+            user = None
     if not user:
         return jsonify({"ok": False, "error": f"arena.ai rejected this session ({err}). Sign in on arena.ai again, then copy fresh cookies."}), False
-    ensure_config_dir()
-    COOKIE_FILE.write_text(candidate.cookie_str, encoding="utf-8")
+    accounts.remember(candidate.cookie_str, user)
     _client = candidate
+    _reset_conversation(candidate)
     _me_cache.update(t=time.time(), user=user, err=None)
     _, _, cookie_user = parse_cookie_input(candidate.cookie_str)
     return jsonify({
@@ -390,7 +497,7 @@ def _activate_cookie(cookie_str: str, method: str):
 @app.route("/api/models")
 def api_models():
     try:
-        models = sync_models(force=False)
+        models = sync_models(force=request.args.get("refresh") == "1")
     except Exception:
         models = {}
     modality = request.args.get("modality", "auto")
@@ -417,7 +524,9 @@ def api_models():
             "capabilities": m.get("capabilities", []),
             "arena_score": m.get("arena_score"),
         })
-    return jsonify(result)
+    resp = jsonify(result)
+    resp.headers["Cache-Control"] = "no-store"  # the picker polls this as arena's catalog changes
+    return resp
 
 
 _LOGIN_STEPS = ("In your browser: sign in on arena.ai, press F12, open the Console tab, type copy(document.cookie) "
@@ -477,22 +586,78 @@ def api_login_poll():
         err = err or "Signed in as a guest only. Sign in with Google or email in the arena.ai window."
         return jsonify({"ok": False, "done": not st["login_open"], "hint": err,
                         "error": None if st["login_open"] else err})
-    ENGINE.sync_to(get_client())
+    client = get_client()
+    ENGINE.sync_to(client)
+    accounts.remember(client.cookie_str, user)
+    _reset_conversation(client)
     _me_cache.update(t=time.time(), user=user, err=None)
     ENGINE.finish_login()
-    return jsonify({"ok": True, "done": True, "email": user.get("email"), "avatar_url": user.get("avatarUrl")})
+    return jsonify({"ok": True, "done": True, "email": user.get("email"), "avatar_url": user.get("avatarUrl"),
+                    "active": accounts.active_id()})
+
+
+def _sign_out_account(account_id: Optional[str]):
+    """Forget one account. Removing the active one switches to the next saved account first."""
+    global _client
+    target = accounts.get(account_id or "")
+    if not target:
+        return jsonify({"ok": False, "error": "Account not found."}), 404
+    if account_id != accounts.active_id():
+        accounts.remove(account_id)
+        return jsonify({"ok": True, "active": accounts.active_id()}), 200
+    others = [a for a in accounts.all_accounts() if a.get("id") != account_id]
+    if others:
+        resp, ok = _activate_cookie(others[0]["cookie"], "switch")
+        if not ok:
+            return resp, 401
+        accounts.remove(account_id)
+        account = accounts.active_account() or {}
+        return jsonify({"ok": True, "active": accounts.active_id(), "switched_to": account.get("email")}), 200
+    accounts.remove(account_id)
+    if _engine_on():
+        ENGINE.logout()
+    _client = ArenaClient(cookie_str=None)
+    _reset_conversation(_client)
+    _me_cache.update(t=0.0, user=None, err=None)
+    return jsonify({"ok": True, "active": None}), 200
+
+
+@app.route("/api/accounts")
+def api_accounts():
+    return jsonify({"accounts": accounts.list_accounts(), "active": accounts.active_id()})
+
+
+@app.route("/api/accounts/switch", methods=["POST"])
+def api_account_switch():
+    data = request.get_json(silent=True) or {}
+    target = accounts.get(data.get("id") or "")
+    if not target:
+        return jsonify({"ok": False, "error": "Account not found."}), 404
+    resp, ok = _activate_cookie(target.get("cookie") or "", "switch")
+    return (resp, 200) if ok else (resp, 401)
+
+
+@app.route("/api/accounts/remove", methods=["POST"])
+def api_account_remove():
+    data = request.get_json(silent=True) or {}
+    return _sign_out_account(data.get("id"))
 
 
 @app.route("/api/logout", methods=["POST"])
 def api_logout():
     global _client
+    data = request.get_json(silent=True) or {}
+    account_id = data.get("id") or accounts.active_id()
+    if account_id:
+        return _sign_out_account(account_id)
     if COOKIE_FILE.exists():
-        COOKIE_FILE.unlink()
+        COOKIE_FILE.unlink(missing_ok=True)
     if _engine_on():
         ENGINE.logout()
     _client = ArenaClient(cookie_str=None)
+    _reset_conversation(_client)
     _me_cache.update(t=0.0, user=None, err=None)
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "active": None})
 
 
 @app.route("/api/settings", methods=["GET", "POST"])
@@ -508,7 +673,7 @@ def api_settings():
 
 @app.route("/api/mode", methods=["POST"])
 def api_mode():
-    global _ui_mode
+    global _ui_mode, _ui_modality
     data = request.get_json(silent=True) or {}
     mode = data.get("mode", "battle")
     api_mode_val = MODE_API_MAP.get(mode, mode)
@@ -518,7 +683,10 @@ def api_mode():
     client.active_mode = api_mode_val
     client.eval_id = None
     _ui_mode = mode
-    return jsonify({"ok": True, "mode": mode, "api_mode": api_mode_val})
+    if mode == "agent":  # Agent mode runs the local tool loop; other modalities would bypass it
+        _ui_modality = "auto"
+        client.active_modality = "chat"
+    return jsonify({"ok": True, "mode": mode, "api_mode": api_mode_val, "modality": _ui_modality})
 
 
 @app.route("/api/modality", methods=["POST"])
@@ -526,6 +694,8 @@ def api_modality():
     global _ui_modality
     data = request.get_json(silent=True) or {}
     modality = data.get("modality", "chat")
+    if _ui_mode == "agent" and modality != "auto":
+        return jsonify({"ok": False, "error": "Agent mode uses Auto only."}), 400
     api_mod = MODALITY_API_MAP.get(modality, modality)
     if api_mod not in VALID_API_MODALITIES:
         return jsonify({"ok": False, "error": f"Invalid modality: {modality}"}), 400
@@ -561,7 +731,7 @@ def api_chats_list():
 def api_chat_load(chat_id):
     global _conversation_history, _current_chat_id
     data = _load_chat(chat_id)
-    if not data:
+    if not data or not _chat_owned_by_active(data):
         return jsonify({"error": "Chat not found"}), 404
     _current_chat_id = chat_id
     _conversation_history = data.get("messages", [])
@@ -575,6 +745,33 @@ def api_chat_delete(chat_id):
     if _delete_chat(chat_id):
         return jsonify({"ok": True})
     return jsonify({"error": "Chat not found"}), 404
+
+
+@app.route("/api/chats/<chat_id>/update", methods=["POST"])
+def api_chat_update(chat_id):
+    """Rename or pin a chat from the sidebar's more-options menu."""
+    data = _load_chat(chat_id)
+    if not data or not _chat_owned_by_active(data):
+        return jsonify({"error": "Chat not found"}), 404
+    body = request.get_json(silent=True) or {}
+    changed = False
+    if "title" in body:
+        title = str(body.get("title") or "").strip()[:120]
+        if not title:
+            return jsonify({"error": "A chat needs a name."}), 400
+        data["title"] = title
+        changed = True
+    if "pinned" in body:
+        data["pinned"] = bool(body.get("pinned"))
+        changed = True
+    if not changed:
+        return jsonify({"error": "Nothing to update."}), 400
+    chat_file = CHATS_DIR / chat_id / "chat.json"
+    try:
+        chat_file.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    except OSError as exc:
+        return jsonify({"error": f"Could not save the chat: {exc}"}), 500
+    return jsonify({"ok": True, "title": data.get("title"), "pinned": bool(data.get("pinned"))})
 
 
 LOG = logging.getLogger("arena.desktop")
@@ -645,6 +842,179 @@ def _send(client: ArenaClient, path: str, body: dict):
     return _HttpStream(r)
 
 
+# ---------- Attachments (arena's own upload flow) ----------
+
+ATTACHMENT_MAX_BYTES = 15 * 1024 * 1024
+ATTACHMENT_MAX_COUNT = 12
+_TEXT_MIMES = {"application/json", "application/xml", "application/javascript", "application/x-javascript",
+               "application/x-httpd-php", "application/x-sh", "application/x-yaml", "application/yaml",
+               "application/sql"}
+_TEXT_SUFFIXES = {".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".jsonl", ".yaml", ".yml", ".toml",
+                  ".ini", ".cfg", ".conf", ".log", ".py", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx",
+                  ".html", ".htm", ".css", ".scss", ".sass", ".less", ".xml", ".sql", ".sh", ".bash",
+                  ".bat", ".cmd", ".ps1", ".c", ".h", ".cc", ".cpp", ".hpp", ".cs", ".java", ".kt",
+                  ".go", ".rs", ".rb", ".php", ".swift", ".lua", ".r", ".m", ".mm", ".pl", ".vue",
+                  ".svelte", ".astro", ".env", ".gitignore", ".dockerfile", ".makefile"}
+
+
+def _arena_reply_error(status: int, text: str) -> str:
+    detail = " ".join((text or "").split())[:200]
+    try:
+        obj = json.loads(text or "")
+        if isinstance(obj, dict):
+            detail = str(obj.get("error") or obj.get("message") or detail)[:200]
+    except ValueError:
+        pass
+    return f"arena.ai returned HTTP {status}" + (f": {detail}" if detail else "")
+
+
+def _arena_json(client: ArenaClient, path: str, payload: dict, timeout: int = 60) -> dict:
+    """POST JSON through the signed-in arena.ai page (desktop) or session (browser mode)."""
+    if _engine_on():
+        if not ENGINE.wait_ready(30):
+            raise RuntimeError(f"arena.ai is waiting for a {ENGINE.challenge} check" if ENGINE.challenge
+                               else "arena.ai window is still loading")
+        r = ENGINE.request(path, payload, timeout=timeout)
+        if r.status_code == 0:
+            raise RuntimeError(r.error or "arena.ai did not answer")
+        text = r.text
+        if not r.ok:
+            raise RuntimeError(_arena_reply_error(r.status_code, text))
+        try:
+            return json.loads(text or "{}")
+        except ValueError:
+            raise RuntimeError("arena.ai sent an unexpected reply")
+    try:
+        r = client.session.post(contracts.ORIGIN + path, json=payload, timeout=timeout)
+    except requests.RequestException as e:
+        raise RuntimeError(f"Can't reach arena.ai: {e}")
+    client.sync_cookies()
+    if not r.ok:
+        raise RuntimeError(_arena_reply_error(r.status_code, r.text))
+    try:
+        return r.json()
+    except ValueError:
+        raise RuntimeError("arena.ai sent an unexpected reply")
+
+
+def _arena_cookies(client: ArenaClient) -> dict:
+    if _engine_on():
+        return ENGINE.cookies()
+    return {c.name: c.value for c in client.session.cookies
+            if (c.domain or "").lstrip(".").endswith("arena.ai")}
+
+
+def _arena_upload(client: ArenaClient, name: str, content_type: str, blob: bytes) -> dict:
+    """Give one file to arena: ask for an upload URL, PUT the bytes, then resolve its signed URL."""
+    gen = _arena_json(client, contracts.PATHS["storage_upload"],
+                      {"fileName": name, "contentType": content_type})
+    upload_url, key = gen.get("uploadUrl"), gen.get("key")
+    if not isinstance(upload_url, str) or not upload_url or not key:
+        raise RuntimeError("arena.ai did not return an upload URL")
+    if upload_url.startswith("/"):
+        upload_url = contracts.ORIGIN + upload_url
+    kwargs = {"timeout": (15, 120)}
+    host = (urlparse(upload_url).hostname or "").lower()
+    if host == "arena.ai" or host.endswith(".arena.ai"):
+        kwargs["cookies"] = _arena_cookies(client)
+    try:
+        put = requests.put(upload_url, data=blob, headers={"Content-Type": content_type}, **kwargs)
+    except requests.RequestException as e:
+        raise RuntimeError(f"Upload failed: {e}")
+    if not put.ok:
+        raise RuntimeError(f"Upload failed (HTTP {put.status_code})")
+    signed = _arena_json(client, contracts.PATHS["storage_signed"], {"key": str(key).lstrip("/")})
+    url = signed.get("url")
+    if isinstance(url, str) and url.startswith("/"):
+        url = contracts.ORIGIN + url
+    if not isinstance(url, str) or not url.startswith("http"):
+        raise RuntimeError("arena.ai did not return a file URL")
+    return {"name": name, "contentType": content_type, "url": url}
+
+
+def _is_text_file(name: str, content_type: str) -> bool:
+    return (content_type.startswith("text/") or content_type in _TEXT_MIMES
+            or Path(name).suffix.lower() in _TEXT_SUFFIXES)
+
+
+def _upload_entry(client: ArenaClient, entry) -> dict:
+    """Turn one composer file (browser data URL, pasted text or a native path) into text or an attachment."""
+    if not isinstance(entry, dict):
+        raise ValueError("Invalid file entry")
+    name = Path(str(entry.get("name") or "file")).name[:200] or "file"
+    content_type = str(entry.get("type") or "").split(";")[0].strip().lower()
+    data = entry.get("data")
+    raw = None
+    if entry.get("path"):
+        p = Path(str(entry["path"])).expanduser()
+        if not p.is_file():
+            raise ValueError(f"{name}: file not found")
+        if p.stat().st_size > ATTACHMENT_MAX_BYTES:
+            raise ValueError(f"{name} is larger than 15 MB")
+        raw = p.read_bytes()
+    elif isinstance(data, str):
+        binary = entry.get("binary")
+        if data.startswith("data:") and binary is not False:
+            header, _, body = data.partition(",")
+            content_type = content_type or header[5:].split(";")[0].strip().lower()
+            try:
+                raw = base64.b64decode(body) if ";base64" in header else urllib.parse.unquote_to_bytes(body)
+            except ValueError:
+                raise ValueError(f"{name}: the file data is damaged")
+        else:
+            raw = data.encode("utf-8")
+            content_type = content_type or "text/plain"
+    if not raw:
+        raise ValueError(f"{name} is empty")
+    if len(raw) > ATTACHMENT_MAX_BYTES:
+        raise ValueError(f"{name} is larger than 15 MB")
+    if not content_type or content_type in ("application/octet-stream", "binary/octet-stream"):
+        content_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
+    if _is_text_file(name, content_type):
+        text = raw.decode("utf-8", errors="replace")
+        if "\x00" not in text[:4096]:
+            return {"name": name, "type": content_type, "size": len(raw), "text": text}
+    return {"name": name, "type": content_type, "size": len(raw),
+            "attachment": _arena_upload(client, name, content_type, raw)}
+
+
+def _clean_attachments(raw) -> list:
+    """Keep only the attachment fields arena expects; drop anything else the frontend may send."""
+    out = []
+    for a in (raw if isinstance(raw, list) else [])[:ATTACHMENT_MAX_COUNT]:
+        if not isinstance(a, dict):
+            continue
+        url = str(a.get("url") or "")
+        if not url.startswith(("http://", "https://")):
+            continue
+        out.append({"name": str(a.get("name") or "file")[:200],
+                    "contentType": str(a.get("contentType") or "application/octet-stream")[:120],
+                    "url": url})
+    return out
+
+
+@app.route("/api/upload", methods=["POST"])
+def api_upload():
+    data = request.get_json(silent=True) or {}
+    files = data.get("files")
+    if not isinstance(files, list) or not files:
+        return jsonify({"error": "No files to upload"}), 400
+    if len(files) > ATTACHMENT_MAX_COUNT:
+        return jsonify({"error": f"Attach at most {ATTACHMENT_MAX_COUNT} files at once."}), 400
+    client = get_client()
+    if not _signed_in_somewhere(client):
+        return jsonify({"error": "Not signed in. Press Sign in first.", "code": "auth"}), 401
+    out = []
+    for entry in files:
+        try:
+            out.append(_upload_entry(client, entry))
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        except RuntimeError as e:
+            return jsonify({"error": str(e)}), 502
+    return jsonify({"files": out})
+
+
 def _wait_for(check, seconds: int):
     """Poll check() once a second with keep-alive pings; returns its first truthy value."""
     for i in range(seconds):
@@ -655,6 +1025,14 @@ def _wait_for(check, seconds: int):
         if i % 10 == 9:
             yield _sse({"type": "ping"})
     return check()
+
+
+def _pause(seconds: int):
+    """Wait between arena.ai attempts, keeping the stream alive; returns False when the user pressed Stop."""
+    deadline = time.time() + max(1, int(seconds))
+    yield _sse({"type": "ping"})
+    yield from _wait_for(lambda: time.time() >= deadline, int(seconds) + 2)
+    return not _stop.is_set()
 
 
 def _permit(mode: str, tool: str, info: dict):
@@ -974,18 +1352,19 @@ def _line_events(r, conv: dict):
     return out
 
 
-def _turn(client: ArenaClient, content: str, conv: dict):
+def _turn(client: ArenaClient, content: str, conv: dict, attachments=None):
     """Send one message and stream the answer. Yields SSE events; returns {"a": text, "b": text},
     or None after sending an error event."""
     v2 = None
-    for _ in range(4):
+    rate_waits = 0
+    while True:
         if conv["new"] and not conv.get("eval_id"):
             conv["eval_id"] = generate_uuidv7()
         try:
             path, body = contracts.build_chat(
                 eval_id=conv["eval_id"], new=conv["new"], mode=conv["mode"], modality=conv["modality"],
                 content=content, ids=generate_uuidv7, model_a=conv.get("model_a"), model_b=conv.get("model_b"),
-                v2_token=v2)
+                attachments=attachments, v2_token=v2)
         except ValueError as e:
             yield _sse({"type": "error", "code": "bad_request", "message": str(e), "retry": False})
             return None
@@ -1034,15 +1413,26 @@ def _turn(client: ArenaClient, content: str, conv: dict):
             conv.update(new=True, eval_id=None)
             yield _sse({"type": "notice", "text": "arena.ai no longer has this conversation, so a new one was started."})
             continue
+        if err["code"] == "rate_limit":
+            rate_waits += 1
+            wait = max(15, int(err.get("wait") or 60))
+            if rate_waits > 1:
+                wait = min(wait * rate_waits, 300)
+            # Pace later tool rounds slower after a limit, so a long task does not walk into it again.
+            conv["pace"] = max(float(conv.get("pace") or 0), min(wait / 10.0, 10.0))
+            yield _sse({"type": "notice", "text": f"arena.ai rate-limited this account. Waiting {wait}s, then retrying "
+                                                  "automatically. Press Stop to cancel."})
+            if not (yield from _pause(wait)):
+                yield _sse({"type": "notice", "text": "Stopped."})
+                return None
+            continue
         if err["code"] in ("challenge", "cloudflare"):
             err["message"] += " Open Arena Desktop (arena-ai.exe): it shows arena.ai's check so you can finish it."
         yield _sse(dict(err, type="error"))
         return None
-    yield _sse({"type": "error", "code": "http", "retry": True, "message": "arena.ai kept refusing the message."})
-    return None
 
 
-def _agent_run(client: ArenaClient, message: str, conv: dict):
+def _agent_run(client: ArenaClient, message: str, conv: dict, attachments=None):
     """Local tools in a text chat: each model asks for tools and the app runs them under the permission mode.
     In Battle and Side by Side each model writes to its own copy of the folder (option-a, option-b)."""
     root = _workspace_dir()
@@ -1056,8 +1446,17 @@ def _agent_run(client: ArenaClient, message: str, conv: dict):
         content = agent.guide(root, permissions.MODES[mode], agent.MODE_NOTES[mode], dual) + message
     total = {"a": "", "b": ""}
     yield _sse({"type": "agent", "root": str(root), "mode": mode, "dual": dual})
-    for rnd in range(1, agent.MAX_ROUNDS + 1):
-        out = yield from _turn(client, content, conv)
+    rnd = 0
+    while True:
+        rnd += 1
+        pace = float(conv.get("pace") or 0)
+        if rnd > 1 and pace > 0:
+            if not conv.get("paced_notice"):
+                conv["paced_notice"] = True
+                yield _sse({"type": "notice", "text": f"Pacing tool rounds by {int(pace)}s to stay under arena.ai's rate limit."})
+            if not (yield from _pause(pace)):
+                break
+        out = yield from _turn(client, content, conv, attachments if rnd == 1 else None)
         if out is None:
             break
         calls = {l: agent.parse_tool_calls(out[l]) for l in lanes}
@@ -1094,9 +1493,6 @@ def _agent_run(client: ArenaClient, message: str, conv: dict):
                             "status": status, "output": (output or "")[:4000]})
         if _stop.is_set():
             break
-        if rnd == agent.MAX_ROUNDS:
-            yield _sse({"type": "notice", "text": f"Stopped after {agent.MAX_ROUNDS} tool rounds. Send 'continue' to keep going."})
-            break
         content = agent.format_lane_results(results) if dual else agent.format_results(results["a"])
         for l in lanes:
             total[l] += "\n\n"
@@ -1128,7 +1524,8 @@ def api_chat():
     global _current_chat_id, _conversation_history
     data = request.get_json(silent=True) or {}
     message = (data.get("message") or "").strip()
-    if not message:
+    attachments = _clean_attachments(data.get("attachments"))
+    if not message and not attachments:
         return jsonify({"error": "Empty message"}), 400
     client = get_client()
     if not _signed_in_somewhere(client):
@@ -1142,13 +1539,17 @@ def api_chat():
     _current_chat_id = data.get("chat_id") or str(uuid.uuid4())
     _stop.clear()
     existing = _load_chat(_current_chat_id) or {}
+    if existing and not _chat_owned_by_active(existing):
+        _current_chat_id = str(uuid.uuid4())  # never append to another account's saved chat
+        existing = {}
     # Each chat keeps its own history and arena conversation. Switching models keeps it, like arena.ai's own
     # follow-up box; a new mode or modality starts a new one.
     same = bool(existing) and (existing.get("mode"), existing.get("modality")) == (_ui_mode, _ui_modality)
     eval_id = existing.get("eval_id") if same else None
+    title = message or (attachments[0]["name"] if attachments else "New chat")
     conv = {"eval_id": eval_id, "new": not eval_id, "mode": mode, "modality": modality,
             "model_a": model_a, "model_b": model_b, "chat_id": _current_chat_id,
-            "title": existing.get("title") or message[:50], "tools": []}
+            "title": existing.get("title") or title[:50], "tools": []}
     history = list(existing.get("messages") or [])
     history.append({"role": "user", "text": message})
     _conversation_history = history
@@ -1169,9 +1570,9 @@ def api_chat():
                 send = note + message
                 yield _sse({"type": "notice", "text": "Sent your local edits to the AI: " + ", ".join(changed)})
         if tools_on:
-            out = yield from _agent_run(client, send, conv)
+            out = yield from _agent_run(client, send, conv, attachments)
         else:
-            out = yield from _turn(client, send, conv)
+            out = yield from _turn(client, send, conv, attachments)
         out = out or {"a": "", "b": ""}
         client.eval_id = None if conv["new"] else conv["eval_id"]
         clean = agent.strip_tool_calls if tools_on else str

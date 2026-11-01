@@ -6,9 +6,13 @@ let selectedModel = null;
 let selectedModelB = null;
 let models = [];
 let isStreaming = false;
+let isUploading = false;
 let chatCounter = 0;
 let isLoggedIn = false;
+let accounts = [];
+let loginAddMode = false;
 let uploadedFiles = [];
+let lastSentAttachments = [];
 let currentChatId = null;
 let streamAbort = null;
 
@@ -40,8 +44,26 @@ document.addEventListener('DOMContentLoaded', () => {
   checkStatus();
   loadModels();
   loadChatHistory();
+  loadAccounts();
   document.getElementById('chatInput').focus();
 });
+
+/* ── Custom title bar (the desktop window is frameless) ── */
+const _tb = () => window.pywebview && window.pywebview.api;
+function tbMinimize() { _tb()?.tb_minimize(); }
+function tbToggleMaximize() { _tb()?.tb_toggle_maximize(); }
+function tbClose() { _tb()?.tb_close(); }
+
+/* Called by the shell when the window is maximized/restored, to swap the icon. */
+function titlebarState(maximized) {
+  const btn = document.getElementById('tbMaxBtn');
+  if (!btn) return;
+  btn.classList.toggle('minimized', !!maximized);
+  btn.title = maximized ? 'Restore' : 'Maximize';
+  btn.innerHTML = maximized
+    ? '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="2" y="4" width="6" height="6" rx="1"/><path d="M4.2 4V2.6a1 1 0 0 1 1-1h4.2a1 1 0 0 1 1 1v4.2a1 1 0 0 1-1 1H8"/></svg>'
+    : '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.5" y="2.5" width="7" height="7" rx="1"/></svg>';
+}
 
 /* ── API ── */
 async function api(path, opts = {}) {
@@ -64,8 +86,13 @@ async function checkStatus(refresh) {
     updatePermUI();
     currentMode = s.mode || currentMode;
     currentModality = s.modality || currentModality;
+    if (currentMode === 'agent' && currentModality !== 'auto') {
+      currentModality = 'auto';
+      api('/api/modality', { method: 'POST', body: JSON.stringify({ modality: 'auto' }) });
+    }
     updateModeUI();
     updateModalityUI();
+    if (modelsWanted !== apiModalityForUI()) loadModels();  // status restored a different modality than the first list
     const ws = document.getElementById('settingsWorkspace');
     if (ws) ws.textContent = s.workspace || '-';
     updateWsChip(s.workspace);
@@ -121,47 +148,145 @@ function updateConnectionBadge(state) {
 }
 
 function updateAuthUI(loggedIn, email) {
-  const logoutBtn = document.getElementById('logoutBtn');
+  const settingsLogin = document.getElementById('settingsLoginBtn');
   const settingsLogout = document.getElementById('settingsLogoutBtn');
+  const accountLogout = document.getElementById('accountLogoutBtn');
   const settingsAuth = document.getElementById('settingsAuthStatus');
   const settingsEmail = document.getElementById('settingsEmail');
 
   if (loggedIn) {
-    logoutBtn.style.display = '';
+    if (settingsLogin) settingsLogin.style.display = 'none';
+    if (accountLogout) accountLogout.style.display = '';
     if (settingsLogout) settingsLogout.style.display = '';
     if (settingsAuth) { settingsAuth.textContent = 'Logged in'; settingsAuth.style.color = 'var(--interactive-positive)'; }
     if (settingsEmail) settingsEmail.textContent = email || '—';
   } else {
-    logoutBtn.style.display = 'none';
+    if (settingsLogin) settingsLogin.style.display = '';
+    if (accountLogout) accountLogout.style.display = 'none';
     if (settingsLogout) settingsLogout.style.display = 'none';
     if (settingsAuth) { settingsAuth.textContent = 'Not logged in'; settingsAuth.style.color = 'var(--text-muted)'; }
     if (settingsEmail) settingsEmail.textContent = '—';
   }
 }
 
+/* ── Accounts ── */
+async function loadAccounts() {
+  try {
+    const r = await api('/api/accounts');
+    accounts = Array.isArray(r.accounts) ? r.accounts : [];
+    renderAccountMenu();
+  } catch (_) {}
+}
+
+function renderAccountMenu() {
+  const list = document.getElementById('accountList');
+  if (!list) return;
+  if (!accounts.length) {
+    list.innerHTML = '<div class="account-empty">No saved accounts</div>';
+  } else {
+    list.innerHTML = accounts.map(a => {
+      const initial = (a.email || '?')[0].toUpperCase();
+      const avatar = a.avatar_url
+        ? `<img src="${attr(safeUrl(a.avatar_url))}" alt="">`
+        : esc(initial);
+      return `<button type="button" class="account-item${a.active ? ' active' : ''}" data-account="${attr(a.id)}">
+        <span class="account-avatar">${avatar}</span>
+        <span class="account-info"><span class="account-email">${esc(a.email || 'Account')}</span>${a.name ? `<span class="account-name">${esc(a.name)}</span>` : ''}</span>
+        ${a.active ? '<span class="account-check">current</span>' : '<span class="account-remove" data-remove="1" title="Remove account">&times;</span>'}
+      </button>`;
+    }).join('');
+    list.querySelectorAll('.account-item').forEach(btn => {
+      btn.onclick = e => {
+        const id = btn.dataset.account;
+        if (e.target.closest('[data-remove]')) removeAccount(id);
+        else switchAccount(id);
+      };
+    });
+  }
+  const logout = document.getElementById('accountLogoutBtn');
+  if (logout) logout.style.display = accounts.some(a => a.active) ? '' : 'none';
+}
+
+function toggleAccountMenu(e) {
+  if (e) e.stopPropagation();
+  if (!isLoggedIn && !accounts.length) { showLogin(false); return; }
+  const menu = document.getElementById('accountMenu');
+  const wrap = menu.parentElement;
+  const open = menu.classList.toggle('open');
+  wrap.classList.toggle('open', open);
+  if (open) loadAccounts();
+}
+
+function closeAccountMenu() {
+  const menu = document.getElementById('accountMenu');
+  if (!menu) return;
+  menu.classList.remove('open');
+  menu.parentElement.classList.remove('open');
+}
+
+async function switchAccount(id) {
+  closeAccountMenu();
+  const target = accounts.find(a => a.id === id);
+  if (target && target.active) return;
+  if (isStreaming) await stopStreaming();
+  notice(`Switching to ${(target && target.email) || 'account'}...`);
+  const r = await api('/api/accounts/switch', { method: 'POST', body: JSON.stringify({ id }) });
+  if (!r || !r.ok) return notice((r && r.error) || 'Could not switch account.', 'err');
+  await checkStatus(true);
+  await newChat();
+  await loadAccounts();
+  notice(`Switched to ${r.email || 'account'}.`, 'ok');
+}
+
+async function removeAccount(id) {
+  const a = accounts.find(x => x.id === id);
+  if (!a) return;
+  if (!confirm(`Remove ${a.email || 'this account'} from this app?\n\nIts saved session will be forgotten here.`)) return;
+  const r = await api('/api/accounts/remove', { method: 'POST', body: JSON.stringify({ id }) });
+  if (!r || !r.ok) return notice((r && r.error) || 'Could not remove account.', 'err');
+  if (a.active) {
+    if (isStreaming) await stopStreaming();
+    await checkStatus(true);
+    await newChat();
+  }
+  await loadAccounts();
+  notice(r.switched_to ? `Removed. Switched to ${r.switched_to}.` : 'Account removed.', 'ok');
+}
+
 let loginPoll = null;
 
-function showLogin() {
+async function showLogin(add) {
+  loginAddMode = !!add;
+  closeAccountMenu();
+  if (isStreaming) await stopStreaming();
+  if (loginAddMode) await loadAccounts();
   document.getElementById('loginModal').classList.add('open');
   setLoginStatus('');
   const desktop = !!(window.appState && window.appState.desktop);
-  document.getElementById('windowLoginBtn').style.display = desktop ? '' : 'none';
-  document.getElementById('windowLoginNote').style.display = desktop ? 'none' : '';
+  const hasAccounts = accounts.length > 0;
+  const blockedByCurrentAccount = loginAddMode && hasAccounts;
+  document.getElementById('loginTitle').textContent = loginAddMode && hasAccounts ? 'Add another arena.ai account' : 'Sign in to arena.ai';
+  document.getElementById('windowLoginBtn').style.display = desktop && !blockedByCurrentAccount ? '' : 'none';
+  document.getElementById('windowLoginNote').style.display = !desktop && !blockedByCurrentAccount ? '' : 'none';
+  document.getElementById('windowLoginIntro').style.display = desktop && !blockedByCurrentAccount ? '' : 'none';
+  document.getElementById('addAccountNote').style.display = blockedByCurrentAccount ? '' : 'none';
 }
 
 function closeLogin() {
   document.getElementById('loginModal').classList.remove('open');
   clearInterval(loginPoll);
   loginPoll = null;
+  loginAddMode = false;
 }
 
 function setLoginStatus(msg, kind = 'info') {
   document.getElementById('loginStatus').innerHTML = msg ? `<div class="status-msg ${kind}" style="white-space:pre-line">${esc(msg)}</div>` : '';
 }
 
-function loginDone(r, how) {
-  setLoginStatus(`Signed in${r.email ? ' as ' + r.email : ''} (${how}).`, 'ok');
-  setTimeout(() => { closeLogin(); checkStatus(true); loadModels(); }, 900);
+async function loginDone(r, how) {
+  setLoginStatus(`${loginAddMode ? 'Added' : 'Signed in as'}${r.email ? ' ' + r.email : ''} (${how}).`, 'ok');
+  await loadAccounts();
+  setTimeout(() => { closeLogin(); checkStatus(true); loadModels(); newChat(); }, 900);
 }
 
 async function windowLogin() {
@@ -210,11 +335,19 @@ async function manualLogin() {
 }
 
 async function logout() {
-  if (!confirm('Sign out of arena.ai in this app?')) return;
-  await api('/api/logout', { method: 'POST' });
+  const active = accounts.find(a => a.active);
+  const who = active && active.email ? ` ${active.email}` : '';
+  if (!confirm(`Sign out${who}? Its saved session will be removed from this app.`)) return;
+  closeAccountMenu();
+  if (isStreaming) await stopStreaming();
+  const r = await api('/api/logout', { method: 'POST' });
+  if (!r || !r.ok) return notice((r && r.error) || 'Could not sign out.', 'err');
   isLoggedIn = false;
   updateAuthUI(false);
-  checkStatus();
+  await checkStatus(true);
+  await newChat();
+  await loadAccounts();
+  notice(r.switched_to ? `Signed out. Switched to ${r.switched_to}.` : 'Signed out.', 'ok');
 }
 
 /* ── Settings ── */
@@ -257,7 +390,9 @@ async function clearAllChats() {
 
 /* ── Sidebar ── */
 function toggleSidebar() {
-  document.getElementById('sidebar').classList.toggle('collapsed');
+  const sidebar = document.getElementById('sidebar');
+  sidebar.classList.toggle('collapsed');
+  document.querySelector('.app').classList.toggle('sidebar-collapsed', sidebar.classList.contains('collapsed'));
 }
 
 function toggleFolder(id) {
@@ -276,18 +411,50 @@ function searchChats() {
 }
 
 /* ── Models ── */
-async function loadModels() {
+let modelsRequest = 0;
+let modelsWanted = null;
+let modelsLoadedAt = 0;
+function apiModalityForUI() {
+  return {auto:'chat',text:'chat',code:'webdev',search:'search',image:'image',video:'video'}[currentModality] || 'chat';
+}
+async function loadModels(force = false) {
+  const apiMod = apiModalityForUI();
+  if (!force && apiMod === modelsWanted && Date.now() - modelsLoadedAt < 30000) return;
+  const req = ++modelsRequest;  // a newer mode/modality wins even if an older request answers last
   const el = document.getElementById('modelList');
+  modelsWanted = apiMod;
   el.innerHTML = '<div style="padding:12px"><div class="skeleton loading-bar"></div><div class="skeleton loading-bar"></div><div class="skeleton loading-bar"></div></div>';
   try {
-    const apiMod = {auto:'chat',text:'chat',code:'webdev',search:'search',image:'image',video:'image'}[currentModality] || 'chat';
-    const data = await api('/api/models?modality=' + apiMod);
-    if (Array.isArray(data)) { models = data; renderModelList(models); renderModelListB(models); }
-    else { el.innerHTML = '<div style="padding:12px;color:var(--text-muted);font-size:13px;text-align:center">Failed to load models</div>'; }
+    const data = await api(`/api/models?modality=${apiMod}${force ? '&refresh=1' : ''}`);
+    if (req !== modelsRequest) return;
+    if (Array.isArray(data)) {
+      models = data;
+      if (selectedModel && !data.some(m => m.id === selectedModel.id)) {
+        selectedModel = null;
+        document.getElementById('modelBtnText').textContent = 'Auto';
+      }
+      if (selectedModelB && !data.some(m => m.id === selectedModelB.id)) {
+        selectedModelB = null;
+        const btnB = document.getElementById('modelBtnTextB');
+        if (btnB) btnB.textContent = 'Model B';
+      }
+      renderModelList(models);
+      renderModelListB(models);
+      if (document.getElementById('modelSearch').value) filterModels();
+      if (document.getElementById('modelSearchB').value) filterModelsB();
+      modelsLoadedAt = Date.now();
+    } else {
+      el.innerHTML = '<div style="padding:12px;color:var(--text-muted);font-size:13px;text-align:center">Failed to load models</div>';
+    }
   } catch (e) {
+    if (req !== modelsRequest) return;
     el.innerHTML = '<div style="padding:12px;color:var(--interactive-negative);font-size:13px;text-align:center">Connection error</div>';
   }
 }
+
+// Keep the picker in step with arena's live catalog while the app stays open.
+setInterval(() => { if (!document.hidden) loadModels(); }, 6 * 60 * 1000);
+window.addEventListener('focus', () => loadModels());
 
 function renderModelList(list) {
   const el = document.getElementById('modelList');
@@ -341,8 +508,10 @@ function selectModelB(m) {
 /* ── Mode ── */
 function selectMode(mode) {
   currentMode = mode;
+  if (mode === 'agent') currentModality = 'auto';
   api('/api/mode', { method: 'POST', body: JSON.stringify({ mode }) });
   updateModeUI();
+  updateModalityUI();
   loadModels();
   closeAllDD();
 }
@@ -356,11 +525,16 @@ const MODE_ICONS = {
 
 function updateModeUI() {
   const labels = { battle: 'Battle', direct: 'Direct', 'side-by-side': 'Side by Side', agent: 'Agent' };
-  document.getElementById('modeBtnText').textContent = labels[currentMode] || currentMode;
-  const modeIcon = document.querySelector('#modeBtn svg:not(.chev)');
-  if (modeIcon && MODE_ICONS[currentMode]) modeIcon.innerHTML = MODE_ICONS[currentMode];
-  const directIcon = document.querySelector('#modeMenu .dd-item[data-mode="direct"] .item-icon');
-  if (directIcon) directIcon.innerHTML = MODE_ICONS.direct;
+  const isPrimary = currentMode === 'battle' || currentMode === 'direct';
+  // Segmented toggle owns the two headline modes; everything else shows in the "More" menu.
+  document.getElementById('segBattle')?.classList.toggle('active', currentMode === 'battle');
+  document.getElementById('segDirect')?.classList.toggle('active', currentMode === 'direct');
+  const moreText = document.getElementById('modeBtnText');
+  if (moreText) moreText.textContent = isPrimary ? 'More' : (labels[currentMode] || currentMode);
+  document.getElementById('modeBtn')?.classList.toggle('active', !isPrimary);
+  document.querySelectorAll('#modeMenu .dd-item').forEach(el => {
+    el.classList.toggle('sel', el.dataset.mode === currentMode);
+  });
 
   const showModelA = MODE_NEEDS_MODEL.includes(currentMode);
   const showModelB = currentMode === 'side-by-side';
@@ -369,14 +543,15 @@ function updateModeUI() {
   if (ddB) ddB.style.display = showModelB ? 'inline-flex' : 'none';
   if (showModelA) document.getElementById('modelBtnText').textContent = selectedModel ? selectedModel.name : (showModelB ? 'Model A' : 'Auto');
   if (showModelB && ddB) document.getElementById('modelBtnTextB').textContent = selectedModelB ? selectedModelB.name : 'Model B';
-
-  document.querySelectorAll('#modeMenu .dd-item').forEach(el => {
-    el.classList.toggle('sel', el.dataset.mode === currentMode);
-  });
 }
 
 /* ── Modality ── */
 function selectModality(mod) {
+  if (currentMode === 'agent' && mod !== 'auto') {
+    notice('Agent mode uses Auto only.', 'warn');
+    updateModalityUI();
+    return;
+  }
   currentModality = mod;
   api('/api/modality', { method: 'POST', body: JSON.stringify({ modality: mod }) });
   updateModalityUI();
@@ -386,24 +561,86 @@ function selectModality(mod) {
 
 function updateModalityUI() {
   const labels = { auto: 'Auto', text: 'Text', code: 'Code', search: 'Web Search', image: 'Image', video: 'Video' };
-  document.getElementById('modalityBtnText').textContent = labels[currentModality] || currentModality;
+  const agentOnly = currentMode === 'agent';
+  document.getElementById('modalityBtnText').textContent = agentOnly ? 'Auto' : (labels[currentModality] || currentModality);
   document.querySelectorAll('#modalityMenu .dd-item').forEach(el => {
+    const allowed = !agentOnly || el.dataset.modality === 'auto';
     el.classList.toggle('sel', el.dataset.modality === currentModality);
+    el.style.display = allowed ? '' : 'none';
   });
+  const sel = document.getElementById('settingsModality');
+  if (sel) {
+    Array.from(sel.options).forEach(o => { o.disabled = agentOnly && o.value !== 'auto'; });
+    sel.value = agentOnly ? 'auto' : currentModality;
+  }
 }
 
 /* ── File Upload ── */
+const MAX_UPLOAD_MB = 15;
+const MAX_UPLOAD_COUNT = 12;
+const EXT_MIME = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp',
+  bmp: 'image/bmp', svg: 'image/svg+xml', pdf: 'application/pdf', txt: 'text/plain', md: 'text/markdown',
+  csv: 'text/csv', tsv: 'text/tab-separated-values', json: 'application/json', py: 'text/x-python',
+  js: 'text/javascript', mjs: 'text/javascript', ts: 'text/typescript', tsx: 'text/typescript',
+  html: 'text/html', htm: 'text/html', css: 'text/css', xml: 'application/xml', yaml: 'application/yaml',
+  yml: 'application/yaml', mp4: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm',
+  mp3: 'audio/mpeg', wav: 'audio/wav', m4a: 'audio/mp4', zip: 'application/zip',
+};
+const TEXT_FILE_RE = /\.(txt|md|markdown|csv|tsv|json|jsonl|ya?ml|toml|ini|cfg|conf|log|py|js|mjs|cjs|jsx|ts|tsx|html?|css|scss|sass|less|xml|sql|sh|bash|bat|cmd|ps1|c|h|cc|cpp|hpp|cs|java|kt|go|rs|rb|php|swift|lua|r|m|mm|pl|vue|svelte|astro|env|gitignore|dockerfile|makefile)$/i;
+
+function guessMime(name) {
+  const ext = (name.split('.').pop() || '').toLowerCase();
+  return EXT_MIME[ext] || '';
+}
+
+function isTextUpload(name, type) {
+  return !type.startsWith('image/') && !type.startsWith('video/') && !type.startsWith('audio/')
+    && (type.startsWith('text/') || ['application/json', 'application/xml', 'application/javascript'].includes(type)
+      || TEXT_FILE_RE.test(name));
+}
+
+function addUploadedFile(name, type, size, data, path, binary) {
+  if (uploadedFiles.length >= MAX_UPLOAD_COUNT) {
+    notice(`Attach at most ${MAX_UPLOAD_COUNT} files at once.`, 'warn');
+    return;
+  }
+  if (uploadedFiles.some(f => f.name === name && f.size === size && f.path === (path || null))) return;
+  uploadedFiles.push({ name, type, size, data, path: path || null, binary: !!binary });
+  renderUploadPreviews();
+  updateSendBtn();
+}
+
+function addFiles(files) {
+  files.forEach(file => {
+    if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
+      notice(`${file.name} is larger than ${MAX_UPLOAD_MB} MB.`, 'warn');
+      return;
+    }
+    const type = file.type || guessMime(file.name) || 'application/octet-stream';
+    const binary = !isTextUpload(file.name, type);
+    const reader = new FileReader();
+    reader.onload = () => addUploadedFile(file.name, type, file.size, reader.result, null, binary);
+    reader.onerror = () => notice(`Could not read ${file.name}.`, 'err');
+    if (binary) reader.readAsDataURL(file);
+    else reader.readAsText(file);
+  });
+}
+
 async function openFileUpload() {
   if (window.pywebview && window.pywebview.api) {
     try {
-      const paths = await window.pywebview.api.open_file_dialog(['Images (*.png;*.jpg;*.gif;*.webp)', 'Code (*.py;*.js;*.html;*.css;*.json)']);
+      const paths = await window.pywebview.api.open_file_dialog([
+        'Images (*.png;*.jpg;*.jpeg;*.gif;*.webp;*.bmp)',
+        'Documents (*.pdf;*.txt;*.md;*.csv)',
+        'Code (*.py;*.js;*.ts;*.tsx;*.html;*.css;*.json)',
+      ]);
       if (paths && paths.length) {
         for (const p of paths) {
           const name = p.split(/[\\/]/).pop();
-          uploadedFiles.push({ name, type: 'application/octet-stream', data: null, path: p, size: 0 });
+          const type = guessMime(name) || 'application/octet-stream';
+          addUploadedFile(name, type, 0, null, p, !isTextUpload(name, type));
         }
-        renderUploadPreviews();
-        updateSendBtn();
       }
       return;
     } catch (_) {}
@@ -412,21 +649,7 @@ async function openFileUpload() {
 }
 
 function handleFileUpload(e) {
-  const files = Array.from(e.target.files);
-  files.forEach(file => {
-    if (file.size > 10 * 1024 * 1024) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      uploadedFiles.push({ name: file.name, type: file.type, data: reader.result, size: file.size });
-      renderUploadPreviews();
-      updateSendBtn();
-    };
-    if (file.type.startsWith('image/')) {
-      reader.readAsDataURL(file);
-    } else {
-      reader.readAsText(file);
-    }
-  });
+  addFiles(Array.from(e.target.files));
   e.target.value = '';
 }
 
@@ -436,10 +659,12 @@ function renderUploadPreviews() {
   uploadedFiles.forEach((f, i) => {
     const thumb = document.createElement('div');
     thumb.className = 'upload-thumb';
-    if (f.type.startsWith('image/')) {
+    thumb.title = `${f.name}${f.size ? ` (${Math.max(1, Math.round(f.size / 1024))} KB)` : ''}`;
+    if (f.type.startsWith('image/') && f.data) {
       thumb.innerHTML = `<img src="${f.data}" alt="${esc(f.name)}"><div class="remove-upload" onclick="removeUpload(${i})">&times;</div>`;
     } else {
-      thumb.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;background:var(--surface-tertiary);font-size:10px;color:var(--text-muted);padding:4px;text-align:center;word-break:break-all">${esc(f.name)}</div><div class="remove-upload" onclick="removeUpload(${i})">&times;</div>`;
+      const label = f.type.startsWith('image/') ? 'Image' : 'File';
+      thumb.innerHTML = `<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;background:var(--surface-tertiary);font-size:10px;color:var(--text-muted);padding:4px;text-align:center;word-break:break-all"><b>${label}</b>${esc(f.name)}</div><div class="remove-upload" onclick="removeUpload(${i})">&times;</div>`;
     }
     container.appendChild(thumb);
   });
@@ -461,6 +686,7 @@ async function newChat() {
   document.getElementById('welcome').style.display = 'flex';
   document.getElementById('settingsPanel').style.display = 'none';
   uploadedFiles = [];
+  lastSentAttachments = [];
   renderUploadPreviews();
   loadChatHistory();
   document.getElementById('chatInput').focus();
@@ -496,10 +722,10 @@ function autoResize(el) {
 function updateSendBtn() {
   const btn = document.getElementById('sendBtn');
   const val = document.getElementById('chatInput').value.trim();
-  btn.disabled = !isStreaming && !val && !uploadedFiles.length;
-  btn.classList.toggle('has-text', !!val || uploadedFiles.length > 0);
+  btn.disabled = isUploading || (!isStreaming && !val && !uploadedFiles.length);
+  btn.classList.toggle('has-text', !isUploading && (!!val || uploadedFiles.length > 0));
   btn.classList.toggle('stop', isStreaming);
-  btn.title = isStreaming ? 'Stop' : 'Send message';
+  btn.title = isStreaming ? 'Stop' : (isUploading ? 'Uploading...' : 'Send message');
   if (!btn.dataset.sendIcon) btn.dataset.sendIcon = btn.innerHTML;
   btn.innerHTML = isStreaming ? '<svg width="14" height="14" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></svg>' : btn.dataset.sendIcon;
 }
@@ -514,10 +740,11 @@ function useSuggestion(text) {
 let lastSent = '';
 async function sendMessage(retryText) {
   if (isStreaming) { stopStreaming(); return; }
+  if (isUploading) return;
   const input = document.getElementById('chatInput');
   const isRetry = typeof retryText === 'string';
   const msg = (isRetry ? retryText : input.value).trim();
-  if (!msg && !uploadedFiles.length) return;
+  if (!msg && !uploadedFiles.length && !(isRetry && lastSentAttachments.length)) return;
   if (!isRetry && msg.startsWith('/') && runSlash(msg)) {
     input.value = '';
     autoResize(input);
@@ -544,19 +771,55 @@ async function sendMessage(retryText) {
 
   const sentFiles = isRetry ? [] : [...uploadedFiles];
   let content = msg;
-  for (const f of sentFiles.filter(f => !f.type.startsWith('image/'))) content += `\n\nFile ${f.name}:\n\`\`\`\n${f.data}\n\`\`\``;
-  if (sentFiles.some(f => f.type.startsWith('image/'))) notice('Images are not sent yet: only text files are attached.', 'warn');
+  let attachments = isRetry ? [...lastSentAttachments] : [];
+
+  if (sentFiles.length) {
+    isUploading = true;
+    updateSendBtn();
+    try {
+      const resp = await fetch('/api/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          files: sentFiles.map(f => ({ name: f.name, type: f.type, data: f.data, path: f.path, size: f.size, binary: !!f.binary })),
+        }),
+      });
+      let up = null;
+      try { up = await resp.json(); } catch (_) {}
+      if (!resp.ok) throw new Error((up && up.error) || `Upload failed (HTTP ${resp.status}).`);
+      if (!up || up.error) throw new Error((up && up.error) || 'Upload failed.');
+      const added = [];
+      for (const f of up.files || []) {
+        if (typeof f.text === 'string') content += `\n\nFile ${f.name}:\n\`\`\`\n${f.text}\n\`\`\``;
+        if (f.attachment) added.push(f.attachment);
+      }
+      attachments = added;
+    } catch (err) {
+      isUploading = false;
+      updateSendBtn();
+      notice(err.message || 'Upload failed.', 'err');
+      uploadedFiles = sentFiles;
+      renderUploadPreviews();
+      if (!isRetry) { input.value = msg; autoResize(input); }
+      return;
+    }
+    isUploading = false;
+    updateSendBtn();
+  }
+
   appendMsg('user', msg + (sentFiles.length ? `\n\n[Attached: ${sentFiles.map(f => f.name).join(', ')}]` : ''));
   if (!isRetry) addToHistory(msg || sentFiles[0]?.name || 'File upload');
   uploadedFiles = [];
   renderUploadPreviews();
   lastSent = content;
+  lastSentAttachments = attachments;
 
   isStreaming = true;
   updateSendBtn();
   const view = new ReplyView(appendMsg('assistant', ''));
   try {
     const body = { message: content, chat_id: currentChatId };
+    if (attachments.length) body.attachments = attachments;
     if (selectedModel && currentMode !== 'battle') body.model_id = selectedModel.id;
     if (selectedModelB && currentMode === 'side-by-side') body.model_id_b = selectedModelB.id;
     streamAbort = new AbortController();
@@ -626,38 +889,106 @@ async function loadChatHistory() {
 
 function renderChatHistory(chats) {
   const hist = document.getElementById('chatHistory');
+  const starred = document.getElementById('starredChats');
   hist.innerHTML = '';
+  if (starred) starred.innerHTML = '';
   if (!chats.length) return;
+
+  // Pinned chats live in the Starred folder; the rest are grouped by recency.
+  const pinned = chats.filter(c => c.pinned);
+  const rest = chats.filter(c => !c.pinned);
+  if (starred) pinned.forEach(c => starred.appendChild(_chatHistoryItem(c, true)));
+
   const now = new Date();
-  const todayStr = now.toDateString();
-  const groups = { today: [], older: [] };
-  chats.forEach(c => {
-    const d = new Date(c.updated_at);
-    (d.toDateString() === todayStr ? groups.today : groups.older).push(c);
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const DAY = 86400000;
+  const groups = [
+    ['Today', c => _chatDate(c) >= startOfToday],
+    ['Yesterday', c => _chatDate(c) >= startOfToday - DAY && _chatDate(c) < startOfToday],
+    ['Previous 7 Days', c => _chatDate(c) >= startOfToday - 7 * DAY && _chatDate(c) < startOfToday - DAY],
+    ['Older', c => _chatDate(c) < startOfToday - 7 * DAY],
+  ];
+  const seen = new Set();
+  groups.forEach(([label, test]) => {
+    const items = rest.filter(c => !seen.has(c.id) && test(c));
+    if (!items.length) return;
+    items.forEach(c => seen.add(c.id));
+    const head = document.createElement('div');
+    head.className = 'history-label';
+    head.textContent = label;
+    hist.appendChild(head);
+    items.forEach(c => hist.appendChild(_chatHistoryItem(c, false)));
   });
-  if (groups.today.length) {
-    const label = document.createElement('div');
-    label.className = 'history-label';
-    label.textContent = 'Today';
-    hist.appendChild(label);
-    groups.today.forEach(c => hist.appendChild(_chatHistoryItem(c)));
-  }
-  if (groups.older.length) {
-    const label = document.createElement('div');
-    label.className = 'history-label';
-    label.textContent = 'Previous';
-    hist.appendChild(label);
-    groups.older.forEach(c => hist.appendChild(_chatHistoryItem(c)));
-  }
 }
 
-function _chatHistoryItem(c) {
+function _chatDate(c) {
+  const t = new Date(c.updated_at || 0).getTime();
+  return Number.isFinite(t) ? t : 0;
+}
+
+function _chatHistoryItem(c, isStarred) {
   const item = document.createElement('div');
-  item.className = 'history-item' + (c.id === currentChatId ? ' active' : '');
-  const preview = (c.title || 'Untitled').length > 30 ? c.title.substring(0, 30) + '...' : (c.title || 'Untitled');
-  item.innerHTML = `<span class="h-text">${esc(preview)}</span><button class="h-del" onclick="event.stopPropagation(); deleteChat('${c.id}')" title="Delete"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>`;
+  item.className = 'history-item' + (c.id === currentChatId ? ' active' : '') + (c.pinned ? ' pinned' : '');
+  const title = c.title || 'Untitled';
+  const preview = title.length > 30 ? title.substring(0, 30) + '...' : title;
+  const pinIcon = '<svg class="h-pin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.8V6a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v4.8l2 2.2v2H7v-2z"/></svg>';
+  item.innerHTML = `${pinIcon}<span class="h-text">${esc(preview)}</span>
+    <button class="h-more" title="More options" onclick="event.stopPropagation(); openChatMenu(event, '${c.id}')">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>
+    </button>`;
+  item.dataset.chatId = c.id;
+  item.dataset.pinned = c.pinned ? '1' : '';
+  item.dataset.title = title;
   item.onclick = () => loadChat(c.id);
   return item;
+}
+
+/* ── Chat more-options menu (rename / pin / delete) ── */
+function openChatMenu(e, chatId) {
+  e.stopPropagation();
+  const menu = document.getElementById('chatMenu');
+  const row = e.currentTarget.closest('.history-item');
+  if (!menu || !row) return;
+  const pinned = !!row.dataset.pinned;
+  menu.dataset.chatId = chatId;
+  menu.querySelector('[data-act="pin"] span').textContent = pinned ? 'Unpin' : 'Pin';
+  const r = e.currentTarget.getBoundingClientRect();
+  menu.classList.add('open');
+  const mw = menu.offsetWidth, mh = menu.offsetHeight;
+  menu.style.left = Math.max(8, Math.min(r.right - mw, window.innerWidth - mw - 8)) + 'px';
+  menu.style.top = (r.bottom + mh > window.innerHeight - 8 ? r.top - mh - 4 : r.bottom + 4) + 'px';
+}
+
+function closeChatMenu() { document.getElementById('chatMenu')?.classList.remove('open'); }
+
+async function chatMenuAction(act) {
+  const menu = document.getElementById('chatMenu');
+  const chatId = menu?.dataset.chatId;
+  closeChatMenu();
+  if (!chatId) return;
+  if (act === 'rename') return renameChat(chatId);
+  if (act === 'delete') return deleteChat(chatId);
+  if (act === 'pin') return togglePinChat(chatId);
+}
+
+async function renameChat(chatId) {
+  const row = document.querySelector(`.history-item[data-chat-id="${chatId}"]`);
+  const current = row?.dataset.title || 'Untitled';
+  const title = prompt('Rename chat:', current);
+  if (title === null) return;
+  const trimmed = title.trim();
+  if (!trimmed) return notice('A chat needs a name.', 'warn');
+  const r = await api('/api/chats/' + chatId + '/update', { method: 'POST', body: JSON.stringify({ title: trimmed }) });
+  if (!r.ok) return notice(r.error || 'Could not rename the chat.', 'err');
+  loadChatHistory();
+}
+
+async function togglePinChat(chatId) {
+  const row = document.querySelector(`.history-item[data-chat-id="${chatId}"]`);
+  const pinned = !!row?.dataset.pinned;
+  const r = await api('/api/chats/' + chatId + '/update', { method: 'POST', body: JSON.stringify({ pinned: !pinned }) });
+  if (!r.ok) return notice(r.error || 'Could not update the chat.', 'err');
+  loadChatHistory();
 }
 
 async function loadChat(chatId) {
@@ -952,6 +1283,7 @@ function toggleDD(id) {
     menu.closest('.dropdown').querySelector('.sel-btn')?.classList.add('open');
     const searchInput = menu.querySelector('.dd-search input');
     if (searchInput) setTimeout(() => searchInput.focus(), 50);
+    if (id === 'modelMenu' || id === 'modelMenuB') loadModels();
   }
 }
 
@@ -962,6 +1294,7 @@ function closeAllDD() {
 
 document.addEventListener('click', e => {
   if (!e.target.closest('.dropdown')) closeAllDD();
+  if (!e.target.closest('.sidebar-user-wrap')) closeAccountMenu();
 });
 
 document.getElementById('loginModal').addEventListener('click', e => {
@@ -971,6 +1304,7 @@ document.getElementById('loginModal').addEventListener('click', e => {
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     closeAllDD();
+    closeAccountMenu();
     closeLogin();
     if (document.getElementById('settingsPanel').style.display !== 'none') closeSettings();
   }
@@ -989,17 +1323,7 @@ document.addEventListener('dragover', e => { e.preventDefault(); });
 document.addEventListener('drop', e => {
   e.preventDefault();
   const files = Array.from(e.dataTransfer.files);
-  if (files.length) {
-    files.forEach(file => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        uploadedFiles.push({ name: file.name, type: file.type, data: reader.result, size: file.size });
-        renderUploadPreviews();
-        updateSendBtn();
-      };
-      file.type.startsWith('image/') ? reader.readAsDataURL(file) : reader.readAsText(file);
-    });
-  }
+  if (files.length) addFiles(files);
 });
 
 /* ── Permission modes (Claude Code style) ── */
@@ -1016,12 +1340,32 @@ let permMode = 'default';
 
 function updatePermUI() {
   const label = document.getElementById('permLabel');
-  if (label) label.textContent = PERM_LABELS[permMode];
+  if (label) {
+    label.textContent = PERM_LABELS[permMode];
+    label.hidden = (permMode === 'default');
+  }
   document.getElementById('permBtn')?.setAttribute('data-perm', permMode);
   document.querySelectorAll('#permMenu .dd-item').forEach(i => i.classList.toggle('sel', i.dataset.perm === permMode));
   const sel = document.getElementById('settingsPerm');
   if (sel) sel.value = permMode;
 }
+
+function toggleAdv() {
+  const m = document.getElementById('permMenu');
+  if (!m) return;
+  const wasOpen = m.classList.contains('open');
+  closeAllDD();
+  if (!wasOpen) m.classList.add('open');
+}
+
+function closeAdv() { document.getElementById('permMenu')?.classList.remove('open'); }
+
+document.addEventListener('click', e => {
+  if (!e.target.closest('.dropdown')) closeAllDD();
+  if (!e.target.closest('.adv-wrap')) closeAdv();
+  if (!e.target.closest('.h-menu')) closeChatMenu();
+  if (!e.target.closest('.sidebar-user-wrap')) closeAccountMenu();
+});
 
 async function setPerm(mode) {
   closeAllDD();
@@ -1160,7 +1504,7 @@ function showHelp() {
     <h3>Getting started</h3><ol class="settings-note help-steps">
       <li>Press <b>Sign in</b> and log in on the arena.ai page that opens inside the app. The app picks up your arena.ai session by itself.</li>
       <li>Pick a mode and a model, then type your message.</li>
-      <li>For <b>Agent</b>, pick a project folder (Settings, Workspace) and a permission mode. The agent reads and writes files only in that folder.</li></ol>
+      <li>For <b>Agent</b>, pick a project folder (Settings, Workspace) and a permission mode. The agent reads and writes files only in that folder, and uses the <b>Auto</b> modality only.</li></ol>
     <h3>Commands</h3><div class="help-grid">${SLASH.map(([c, d]) => `<code>${c}</code><span>${esc(d)}</span>`).join('')}</div>
     <h3>Shortcuts</h3><div class="help-grid">${keys.map(([k, d]) => `<kbd>${k}</kbd><span>${d}</span>`).join('')}</div>
     <h3>Chat modes</h3><div class="help-grid">
@@ -1576,6 +1920,7 @@ class ReplyView {
   done(ev) {
     this.finished = true;
     for (const [l, ln] of Object.entries(this.lanes)) {
+      if (ln.seg && ln.seg.pending) this.paint(ln.seg);  // text can still be queued in rAF when a fast answer ends
       const src = this.sources[l];
       if (src && src.length) {
         this.add(l, 'sources', 'Sources: ' + src.map((s, i) => {

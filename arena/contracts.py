@@ -24,6 +24,8 @@ PATHS: Dict[str, str] = {
     "catalog": "/nextjs-api/model-catalog",
     "webdev": "/api/evaluation/webdev/{message_id}",
     "sign_out": "/nextjs-api/sign-out",
+    "storage_upload": "/api/storage/generate-upload-url",
+    "storage_signed": "/api/storage/get-signed-url",
 }
 KEYS: Dict[str, str] = {
     "v3": "6LeTGMcsAAAAALuIlkVwIxaAuZA8VledA6d3Nnb0",
@@ -179,6 +181,8 @@ def classify_error(status: int, text: str = "") -> Dict[str, Any]:
         return out("network", "Can't reach arena.ai. Check your internet connection, then retry.", True, 5)
     if "just a moment" in low or "cf-chl" in low or ("cloudflare" in low and status in (403, 503)):
         return out("cloudflare", "Cloudflare wants to check this browser. Finish the check in the arena.ai window that opened.", True)
+    if "too many requests" in low or "rate limit" in low or "rate-limit" in low:
+        return out("rate_limit", "arena.ai is rate-limiting this account. Wait about a minute, then send again.", True, 60)
     if "captcha" in low:
         return out("challenge", "arena.ai asked for a quick human check. Complete it in the arena.ai window; "
                                 "your message resends by itself.", True)
