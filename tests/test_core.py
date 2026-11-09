@@ -983,6 +983,7 @@ def test_generated_media_is_saved_to_the_picked_folder(web, tmp_path, monkeypatc
         def raise_for_status(self):
             pass
 
+    monkeypatch.setattr(appmod, "_url_is_public", lambda url: None)  # URL vetting off: unit test
     monkeypatch.setattr(appmod.requests, "get", lambda url, timeout: Got())
     out = list(appmod._save_media({"url": "https://cdn.example/img/cat.png", "kind": "image"}, "a", {"title": "A cat"}))
     saved = list((tmp_path / "ws").glob("*-a-*.png"))
@@ -2206,6 +2207,7 @@ def test_native_file_bridge_downloads_and_dedupes(web, monkeypatch, tmp_path):
     appmod, _c, cfg, _use, _sent = web
     cfg["permission_mode"] = "auto"
     cfg["workspace_dir"] = str(tmp_path / "picked")
+    monkeypatch.setattr(appmod, "_url_is_public", lambda url: None)  # URL vetting off: unit test
     monkeypatch.setattr(appmod.requests, "get", lambda url, timeout=None: _FakeDownload(b"print('hi')\n"))
     state = {}
     files = [{"url": "https://example.test/snake.py", "title": "snake.py", "kind": "file"}]
@@ -2222,6 +2224,7 @@ def test_native_file_bridge_downloads_and_dedupes(web, monkeypatch, tmp_path):
 def test_native_file_bridge_respects_plan_and_sanitizes_names(web, monkeypatch, tmp_path):
     appmod, _c, cfg, _use, _sent = web
     cfg["workspace_dir"] = str(tmp_path / "picked")
+    monkeypatch.setattr(appmod, "_url_is_public", lambda url: None)  # URL vetting off: unit test
     monkeypatch.setattr(appmod.requests, "get", lambda url, timeout=None: _FakeDownload(b"x"))
     files = [{"url": "https://example.test/evil", "title": "../../evil.txt", "kind": "file"}]
     cfg["permission_mode"] = "plan"
