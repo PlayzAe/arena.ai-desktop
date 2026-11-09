@@ -24,22 +24,22 @@ Things that are broken or unfinished in Arena Desktop. Fixes and pull requests a
 
 ## Security (v1.5.0)
 
-- **CDN scripts still load without subresource integrity.** Planned for a future release.
+- **Connector OAuth widget loads from a CDN without SRI (analyzed 2026-11-10).** The Arena-connector link flow injects `https://ah-cdn.merge.dev/initialize.js` (Merge Link, arena.ai's own connector vendor — the link token comes from arena.ai's API) into the arena.ai engine window. Subresource integrity cannot realistically secure it: the URL is unversioned and rotates on Merge's schedule (`cache-control: max-age=120`), and the loader then fetches the rest of the widget from the same vendor, so pinning a hash would only break "Connect GitHub/Notion" on every vendor deploy without containing a compromised vendor. Mitigations in place: the widget loads only on an explicit user action, with `crossorigin="anonymous"` (no credentials to the CDN), and the trust decision mirrors arena.ai's own web connector flow. Durable fix (needs live verification of Merge token origin policy): run the widget outside the arena.ai origin, or pin a hash if Merge publishes a versioned loader URL.
 - **Release binary is unsigned.** No code signature, no SBOM, no CI pipeline yet. SmartScreen will warn.
 - **Dependencies are unpinned.** `requirements.txt` uses lower bounds only. `pip-compile --generate-hashes` planned.
 - **Cookie plaintext fallback.** If DPAPI fails, cookies are stored unencrypted. Low risk on single-user Windows desktops.
 - **No rate limiting on localhost API.** Mitigated by per-launch random token and localhost binding.
-- **SSRF TOCTOU gap.** DNS rebinding can bypass the `ipaddress` check between resolve and fetch. Full fix requires connecting to the resolved IP directly.
+- **SSRF: media-save is TOCTOU-safe; three download paths still re-resolve.** `/api/media/save` now validates every resolved address and connects to the exact IP it validated (`_pinned_https_get`), so DNS rebinding cannot win there. The three model-output download paths (Arena Agent file sync, generated-media save, sandbox mirror downloads) are validated against the private/loopback/link-local/CGNAT/multicast blocklist but still fetch via `requests.get`, which re-resolves DNS at connect time. Routing them through the pinned transport (while keeping their test seams) is the remaining work.
 
 ## Testing
 
-- 40 test failures in `test_core` (agent loop, auto-retry and subagent logic). Token injection and upload/safety tests fixed via `tests/conftest.py`.
+- The full pytest suite is green as of 2026-11-10 (364 passed, 22 environment-dependent skips on machines without browsers, 0 failures). Run it with `PYTHONPATH=. python -m pytest tests/ -q`.
 - The live test scripts close `arena-ai.exe` and change the shared folder setting while they run. Close the app before running them.
 
 ## Logs
 
-- `%USERPROFILE%\.arena-cli\desktop.log`: every send, its HTTP status, human checks and each sandbox step.
-- Start the app with `ARENA_STREAM_DUMP=1` to save every raw stream line to `%USERPROFILE%\.arena-cli\streams\`.
+- `%USERPROFILE%\.arena-personal\desktop.log`: every send, its HTTP status, human checks and each sandbox step.
+- Start the app with `ARENA_STREAM_DUMP=1` to save every raw stream line to `%USERPROFILE%\.arena-personal\streams\`.
 
 ## Arena Agent → local folder (v1.5.0)
 

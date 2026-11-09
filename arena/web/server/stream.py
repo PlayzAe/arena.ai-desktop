@@ -590,14 +590,14 @@ def _save_media(m: dict, lane: str, conv: dict):
         return
     done.add(m["url"])
     try:
-        r = requests.get(m["url"], timeout=120)
+        r = _media_get(m["url"], timeout=120)
         r.raise_for_status()
         ext = Path(urlparse(m["url"]).path).suffix[:6] or mimetypes.guess_extension(
             (r.headers.get("content-type") or "").split(";")[0].strip()) or ".bin"
         ws.mkdir(parents=True, exist_ok=True)
         target = ws / f"{workspace.slug(conv['title'])}-{lane}-{uuid.uuid4().hex[:6]}{ext}"
         target.write_bytes(r.content)
-    except (requests.RequestException, OSError) as e:
+    except (requests.RequestException, OSError, ValueError) as e:
         yield _sse({"type": "notice", "model": lane, "text": f"Could not save the {m.get('kind') or 'file'}: {e}"})
         return
     yield _sse({"type": "notice", "model": lane, "text": f"Saved to {target}"})
@@ -703,7 +703,7 @@ def _sandbox_call(lane: str, call: dict, conv: dict):
                 if target.exists() and (not target.is_file() or rel not in man or _digest(target.read_bytes()) != man[rel]):
                     raise PermissionError("not copied: file is untracked or has local changes")
                 if op["kind"] == "download":
-                    r = requests.get(op["url"], timeout=60)
+                    r = _media_get(op["url"], timeout=60)
                     r.raise_for_status()
                     data = r.content
                     row["verb"] = "Saved"

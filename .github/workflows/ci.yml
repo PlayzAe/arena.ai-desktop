@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: pytest (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install dependencies (pinned, hash-verified)
+        run: pip install --require-hashes -r requirements-dev.lock
+
+      - name: Run tests
+        run: python -m pytest tests/ -q --timeout=120 --timeout-method=thread
+        env:
+          # Belt and braces: conftest.py also isolates the config dir,
+          # this makes it impossible for CI to touch a real profile.
+          ARENA_CONFIG_DIR: ${{ runner.temp }}/arena-config
+          ARENA_PROJECTS_DIR: ${{ runner.temp }}/arena-projects
+
+  js-bundle:
+    name: JS bundle integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Rebuild app.js and fail on drift
+        run: |
+          python scripts/build-js.py
+          git diff --exit-code arena/web/static/app.js || {
+            echo "::error::arena/web/static/app.js is out of date — run python scripts/build-js.py and commit the result."
+            exit 1
+          }
+
+      - name: Syntax-check the bundle
+        run: node --check arena/web/static/app.js

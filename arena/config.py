@@ -46,7 +46,7 @@ class UserAbort(Exception):
 
 
 def ensure_config_dir() -> Path:
-    """Ensure ~/.arena-cli exists."""
+    """Ensure the config folder (~/.arena-personal) exists."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     return CONFIG_DIR
 
