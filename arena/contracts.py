@@ -387,7 +387,14 @@ def classify_error(status: int, text: str = "", headers=None) -> Dict[str, Any]:
     def out(code, message, retry=False, wait=0):
         return {"code": code, "status": status, "message": message, "detail": detail, "retry": retry, "wait": wait}
 
-    # The human check comes first: a send held back by an open check also
+    # A Cloudflare interstitial ("Just a moment", cf-chl) is a page-level
+    # block whose HTML also says "complete a CAPTCHA" / "verify you are
+    # human". Match it before the human-check phrases, or those pages route
+    # to the in-app checkbox flow instead of the Cloudflare check the user
+    # must actually finish (issue: "human check not work").
+    if "just a moment" in low or "cf-chl" in low or ("cloudflare" in low and status in (403, 503)):
+        return out("cloudflare", "Cloudflare wants to check this browser. Finish the check in the arena.ai window that opened.", True)
+    # The human check comes next: a send held back by an open check also
     # arrives with status 0, and that is not a network problem.
     if any(phrase in low for phrase in HUMAN_CHECK_PHRASES):
         return out("challenge", "arena.ai asked for a quick human check (\"I'm not a robot\"). Complete it in the "
@@ -398,8 +405,6 @@ def classify_error(status: int, text: str = "", headers=None) -> Dict[str, Any]:
                                    "steps count too). Start a new chat to continue; your files stay in your folder.")
     if status == 0:
         return out("network", "Can't reach arena.ai. Check your internet connection, then retry.", True, 5)
-    if "just a moment" in low or "cf-chl" in low or ("cloudflare" in low and status in (403, 503)):
-        return out("cloudflare", "Cloudflare wants to check this browser. Finish the check in the arena.ai window that opened.", True)
     if status == 401:
         return out("auth", "Your arena.ai session ended. Sign in again from Settings, Account.")
     if status == 403 and str(body.get("error") or "") == ACCOUNT_TOO_NEW_FOR_VIDEO:

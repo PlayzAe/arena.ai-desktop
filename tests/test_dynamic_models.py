@@ -108,11 +108,19 @@ class TestDynamicModels(unittest.TestCase):
 
 class TestBrowserTools(unittest.TestCase):
     def test_browser_detect_tool(self):
+        from arena.auth import detect_installed_browsers
         tool = BrowserDetectTool(cwd=os.getcwd())
         output = tool.execute({})
         self.assertIn("Installed & Available Browsers:", output)
-        # Should detect at least Brave / Chrome / Edge on this Windows machine
-        self.assertTrue("Brave" in output or "Edge" in output or "Chrome" in output)
+        installed = detect_installed_browsers()
+        # The tool must report exactly what detection found (any platform).
+        for name, path in installed.items():
+            self.assertIn(name, output)
+            self.assertIn(path, output)
+        if not installed:
+            # Headless/CI machines have no supported browser installed;
+            # the report is still valid, there is just nothing to find.
+            self.skipTest("No supported browser installed on this machine")
 
     def test_browser_open_url_tool_validation(self):
         tool = BrowserOpenUrlTool(cwd=os.getcwd())

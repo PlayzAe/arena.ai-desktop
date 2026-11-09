@@ -198,6 +198,21 @@ def test_classify_error(status, text, code):
     assert err["code"] == code and err["message"]
 
 
+def test_cloudflare_interstitial_with_captcha_wording_is_not_a_human_check():
+    # Regression (upstream issue #3): a Cloudflare interstitial says both
+    # "Just a moment" and "Why do I have to complete a CAPTCHA?" / "Verify
+    # you are human". It must route to the Cloudflare flow, not to the
+    # in-app reCAPTCHA checkbox, which cannot fix a page-level block.
+    html = ("<html><title>Just a moment...</title>"
+            "<p>Why do I have to complete a CAPTCHA? Verify you are human"
+            " before proceeding.</p><div id=\"cf-chl-widget\"></div></html>")
+    err = contracts.classify_error(403, html)
+    assert err["code"] == "cloudflare"
+    assert contracts.classify_error(503, "cf-chl-bypass: complete the captcha")["code"] == "cloudflare"
+    # A plain API-level check request still maps to the human check.
+    assert contracts.classify_error(403, '{"error":"Please complete the captcha"}')["code"] == "challenge"
+
+
 def test_rate_limit_suggests_wait():
     assert contracts.classify_error(429, "")["wait"] >= 30
 

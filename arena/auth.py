@@ -25,7 +25,7 @@ from arena.config import save_cookie, get_cookie, load_config, save_config, User
 
 def detect_installed_browsers() -> Dict[str, str]:
     """
-    Detect all installed browsers on Windows.
+    Detect installed browsers on Windows, macOS and Linux.
     Returns dict mapping friendly name -> executable path.
     """
     candidates = {
@@ -81,6 +81,36 @@ def detect_installed_browsers() -> Dict[str, str]:
                         found[b_name] = val
             except Exception:
                 pass
+
+    # macOS application bundles
+    mac_bundles = {
+        "Brave": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        "Google Chrome": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "Microsoft Edge": "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        "Mozilla Firefox": "/Applications/Firefox.app/Contents/MacOS/firefox",
+        "Opera": "/Applications/Opera.app/Contents/MacOS/Opera",
+        "Vivaldi": "/Applications/Vivaldi.app/Contents/MacOS/Vivaldi",
+    }
+    for b_name, p in mac_bundles.items():
+        if b_name not in found and os.path.isfile(p):
+            found[b_name] = p
+
+    # PATH lookup (Linux, macOS, portable installs on any platform)
+    which_names = {
+        "Brave": ("brave", "brave-browser", "brave-browser-stable"),
+        "Google Chrome": ("google-chrome", "google-chrome-stable", "chrome"),
+        "Microsoft Edge": ("microsoft-edge", "microsoft-edge-stable", "msedge"),
+        "Mozilla Firefox": ("firefox", "firefox-esr"),
+        "Opera": ("opera",),
+        "Vivaldi": ("vivaldi", "vivaldi-stable"),
+    }
+    for b_name, cmds in which_names.items():
+        if b_name not in found:
+            for cmd in cmds:
+                hit = shutil.which(cmd)
+                if hit:
+                    found[b_name] = hit
+                    break
 
     return found
 
