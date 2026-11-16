@@ -5,4 +5,4 @@
 # Install them with:  pip install --require-hashes -r requirements-dev.lock
 -r requirements.txt
 pytest>=8.0
-pytest-timeout>=2.3
+pytest-timeout>=2.4.0
