@@ -1,0 +1,8 @@
+# Development / CI dependencies.
+# Compile reproducible hashed lock files with:
+#   pip-compile --generate-hashes --output-file=requirements.lock requirements.txt
+#   pip-compile --generate-hashes --output-file=requirements-dev.lock requirements-dev.txt
+# Install them with:  pip install --require-hashes -r requirements-dev.lock
+-r requirements.txt
+pytest>=8.0
+pytest-timeout>=2.3

@@ -198,6 +198,21 @@ def test_classify_error(status, text, code):
     assert err["code"] == code and err["message"]
 
 
+def test_cloudflare_interstitial_with_captcha_wording_is_not_a_human_check():
+    # Regression (upstream issue #3): a Cloudflare interstitial says both
+    # "Just a moment" and "Why do I have to complete a CAPTCHA?" / "Verify
+    # you are human". It must route to the Cloudflare flow, not to the
+    # in-app reCAPTCHA checkbox, which cannot fix a page-level block.
+    html = ("<html><title>Just a moment...</title>"
+            "<p>Why do I have to complete a CAPTCHA? Verify you are human"
+            " before proceeding.</p><div id=\"cf-chl-widget\"></div></html>")
+    err = contracts.classify_error(403, html)
+    assert err["code"] == "cloudflare"
+    assert contracts.classify_error(503, "cf-chl-bypass: complete the captcha")["code"] == "cloudflare"
+    # A plain API-level check request still maps to the human check.
+    assert contracts.classify_error(403, '{"error":"Please complete the captcha"}')["code"] == "challenge"
+
+
 def test_rate_limit_suggests_wait():
     assert contracts.classify_error(429, "")["wait"] >= 30
 
@@ -968,6 +983,7 @@ def test_generated_media_is_saved_to_the_picked_folder(web, tmp_path, monkeypatc
         def raise_for_status(self):
             pass
 
+    monkeypatch.setattr(appmod, "_url_is_public", lambda url: None)  # URL vetting off: unit test
     monkeypatch.setattr(appmod.requests, "get", lambda url, timeout: Got())
     out = list(appmod._save_media({"url": "https://cdn.example/img/cat.png", "kind": "image"}, "a", {"title": "A cat"}))
     saved = list((tmp_path / "ws").glob("*-a-*.png"))
@@ -2191,6 +2207,7 @@ def test_native_file_bridge_downloads_and_dedupes(web, monkeypatch, tmp_path):
     appmod, _c, cfg, _use, _sent = web
     cfg["permission_mode"] = "auto"
     cfg["workspace_dir"] = str(tmp_path / "picked")
+    monkeypatch.setattr(appmod, "_url_is_public", lambda url: None)  # URL vetting off: unit test
     monkeypatch.setattr(appmod.requests, "get", lambda url, timeout=None: _FakeDownload(b"print('hi')\n"))
     state = {}
     files = [{"url": "https://example.test/snake.py", "title": "snake.py", "kind": "file"}]
@@ -2207,6 +2224,7 @@ def test_native_file_bridge_downloads_and_dedupes(web, monkeypatch, tmp_path):
 def test_native_file_bridge_respects_plan_and_sanitizes_names(web, monkeypatch, tmp_path):
     appmod, _c, cfg, _use, _sent = web
     cfg["workspace_dir"] = str(tmp_path / "picked")
+    monkeypatch.setattr(appmod, "_url_is_public", lambda url: None)  # URL vetting off: unit test
     monkeypatch.setattr(appmod.requests, "get", lambda url, timeout=None: _FakeDownload(b"x"))
     files = [{"url": "https://example.test/evil", "title": "../../evil.txt", "kind": "file"}]
     cfg["permission_mode"] = "plan"

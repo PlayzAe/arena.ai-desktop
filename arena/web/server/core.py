@@ -300,6 +300,152 @@ def _validate_chat_id(chat_id: str) -> bool:
     return bool(_UUID_RE.match(chat_id))
 
 
+# ---------------------------------------------------------------------------
+# Outbound URL safety (SSRF hardening).
+#
+# Several routes download files from URLs that arrive in model output or
+# user input. Every such fetch must be validated first: the helpers below
+# reject non-https schemes and any hostname that resolves to a private,
+# loopback, link-local, reserved, multicast, unspecified or CGNAT address
+# (IPv4 and IPv6, including IPv4-mapped).
+#
+# _pinned_https_get goes further: it resolves once, validates every
+# returned address, then connects to that exact address while verifying
+# TLS against the original hostname. One resolve for both steps — a DNS
+# rebinding flip between check and connect cannot redirect the socket.
+
+_CGNAT_V4 = None  # built lazily (ip_network), see _ip_blocked
+
+
+def _ip_blocked(addr: str) -> bool:
+    """True when an address must never be fetched (private/internal ranges)."""
+    import ipaddress as _ipmod
+    global _CGNAT_V4
+    try:
+        ip = _ipmod.ip_address(str(addr).split("%")[0])  # strip IPv6 zone id
+    except ValueError:
+        return True
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:  # ::ffff:127.0.0.1 and friends behave like IPv4
+        ip = mapped
+    if _CGNAT_V4 is None:
+        _CGNAT_V4 = _ipmod.ip_network("100.64.0.0/10")
+    if ip.version == 4 and ip in _CGNAT_V4:
+        return True
+    return bool(ip.is_private or ip.is_loopback or ip.is_reserved
+                or ip.is_link_local or ip.is_multicast or ip.is_unspecified)
+
+
+def _resolve_public_ip(host: str) -> str:
+    """Resolve `host`, vet every address, and return the first (public) one.
+    Callers must connect only to the returned address (see _PinnedHTTPSConnection).
+    Raises ValueError for unresolvable or blocked hosts."""
+    import socket as _sock
+    try:
+        infos = _sock.getaddrinfo(host, None, type=_sock.SOCK_STREAM)
+    except _sock.gaierror:
+        raise ValueError("Cannot resolve hostname.")
+    first = None
+    for info in infos:
+        addr = info[4][0]
+        if _ip_blocked(addr):
+            raise ValueError("Private/internal addresses not allowed.")
+        if first is None:
+            first = addr
+    if first is None:
+        raise ValueError("Cannot resolve hostname.")
+    return first
+
+
+def _url_is_public(url: str, allow_http: bool = False) -> Optional[str]:
+    """None when the URL is safe to fetch; otherwise a human-readable reason."""
+    u = urllib.parse.urlparse(url)
+    schemes = ("https", "http") if allow_http else ("https",)
+    if u.scheme not in schemes:
+        return "Only https links can be fetched."
+    host = (u.hostname or "").lower()
+    if not host or host == "localhost" or host.endswith(".localhost"):
+        return "Local addresses are not allowed."
+    try:
+        _resolve_public_ip(host)
+    except ValueError as e:
+        return str(e)
+    return None
+
+
+def _media_get(url: str, timeout: float = 120):
+    """Fetch a model-supplied media/file URL after SSRF validation.
+    Keeps the plain requests.get call so tests can stub it."""
+    err = _url_is_public(url)
+    if err:
+        raise ValueError(err)
+    return requests.get(url, timeout=timeout)
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS connection that connects to one pre-validated IP address but
+    verifies the TLS certificate against the real hostname."""
+
+    def __init__(self, host: str, ip: str, timeout: float = 60):
+        super().__init__(host, timeout=timeout)
+        self._pinned_ip = ip
+
+    def connect(self):
+        import socket as _sock
+        sock = _sock.create_connection((self._pinned_ip, self.port), self.timeout)
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+
+def _pinned_https_get(url: str, timeout: float = 60,
+                      max_bytes: int = 300 * 1024 * 1024,
+                      max_redirects: int = 3):
+    """Stream a public https URL into memory with a size cap.
+    Returns (blob, content_type). Follows up to `max_redirects` hops,
+    re-validating and re-pinning every hop. Raises ValueError for refused
+    URLs and OSError for HTTP errors."""
+    blob = b""
+    current = url
+    for _hop in range(max_redirects + 1):
+        u = urllib.parse.urlparse(current)
+        if u.scheme != "https":
+            raise ValueError("Only https links can be fetched.")
+        host = (u.hostname or "").lower()
+        if not host or host == "localhost" or host.endswith(".localhost"):
+            raise ValueError("Local addresses are not allowed.")
+        # One resolve for both the vetting and the connect: a DNS flip
+        # right after this line cannot redirect the socket elsewhere.
+        pinned_ip = _resolve_public_ip(host)
+        conn = _PinnedHTTPSConnection(u.hostname, pinned_ip, timeout=timeout)
+        try:
+            path = urllib.parse.urlunparse(("", "", u.path or "/", u.params, u.query, ""))
+            conn.request("GET", path, headers={
+                "Host": u.hostname,
+                "User-Agent": "Arena-Desktop-Media/1.0",
+                "Accept": "*/*",
+            })
+            resp = conn.getresponse()
+            if resp.status in (301, 302, 303, 307, 308):
+                loc = resp.getheader("Location") or ""
+                if not loc:
+                    raise OSError(f"HTTP {resp.status}: redirect without Location")
+                current = urllib.parse.urljoin(current, loc)
+                continue
+            if resp.status >= 400:
+                raise OSError(f"HTTP {resp.status}")
+            ctype = (resp.getheader("Content-Type") or "").split(";")[0].strip()
+            while True:
+                chunk = resp.read(1 << 16)
+                if not chunk:
+                    break
+                blob += chunk
+                if len(blob) > max_bytes:
+                    raise ValueError(f"File is larger than {max_bytes // (1024 * 1024)} MB.")
+            return blob, ctype
+        finally:
+            conn.close()
+    raise OSError("Too many redirects.")
+
+
 def _chat_changed(old, new) -> bool:
     """True when the conversation itself changed: a message was added or a
     message's text differs (re-saving the same history is not a change)."""

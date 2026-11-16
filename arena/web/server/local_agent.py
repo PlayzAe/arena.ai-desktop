@@ -822,7 +822,7 @@ def _agent_run(client: ArenaClient, message: str, conv: dict):
                                     "chat_id": parent_chat,
                                     "subagent": _QUESTIONS[qid]["subagent"]})
                         _notify("Arena Desktop", "The model is waiting for your answer.", "question")
-                        answer_text = yield from _wait_for(lambda: _question_answer(qid), QUESTION_TIMEOUT)
+                        answer_text = yield from _wait_for(lambda qid=qid: _question_answer(qid), QUESTION_TIMEOUT)
                         with _questions_lock:
                             _QUESTIONS.pop(qid, None)
                         yield _sse({"type": "question_done", "id": qid, "lane": l,
@@ -870,7 +870,7 @@ def _agent_run(client: ArenaClient, message: str, conv: dict):
                                     "chat_id": parent_chat,
                                     "subagent": _QUESTIONS[qid]["subagent"]})
                         _notify("Arena Desktop", "The model proposed a plan for your review.", "question")
-                        answer_text = yield from _wait_for(lambda: _question_answer(qid), QUESTION_TIMEOUT)
+                        answer_text = yield from _wait_for(lambda qid=qid: _question_answer(qid), QUESTION_TIMEOUT)
                         with _questions_lock:
                             _QUESTIONS.pop(qid, None)
                         yield _sse({"type": "question_done", "id": qid, "lane": l,
@@ -1018,11 +1018,17 @@ def _agent_run(client: ArenaClient, message: str, conv: dict):
                     except ValueError as e:
                         mcp_error = str(e)
                         args_display = str(call.get("params") or {})[:4000]
+                    # MCP calls run on a connector server, not on local paths,
+                    # so workspace containment ("inside") does not apply. The
+                    # mapped permission kind below (read_file when readOnlyHint,
+                    # run_cmd otherwise) is the gate: marking these "outside"
+                    # made even read-only MCP tools ask for approval, hanging
+                    # the auto-allow path ("reads are free").
                     info = {
                         "tool": call["name"], "model": l, "mcp": True,
                         "server": mcp_entry["server"], "mcp_tool": mcp_entry["tool"],
                         "summary": f"MCP {mcp_entry['server']}: {mcp_entry['tool']}",
-                        "rel": mcp_entry["server"], "path": args_display, "inside": False,
+                        "rel": mcp_entry["server"], "path": args_display, "inside": True,
                     }
                 else:
                     info = dict(tools[l].describe(call), model=l)

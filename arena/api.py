@@ -201,6 +201,7 @@ def send_chat_via_cdp(
     modality: str = "chat",
     port: int = 9222,
     timeout: int = 60,
+    mode: str = "battle",
 ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """
     Send chat entirely through browser CDP. Returns (text, eval_id, error).
@@ -245,7 +246,7 @@ def send_chat_via_cdp(
 
         const body = {{
             id: evalId,
-            mode: '{self.active_mode}',
+            mode: '{mode}',
             userMessageId: uuidv7(),
             modelAMessageId: uuidv7(),
             modelBMessageId: uuidv7(),
@@ -257,7 +258,7 @@ def send_chat_via_cdp(
             modality: '{modality}',
             recaptchaV3Token: token,
         }};
-        if ('{self.active_mode}' !== 'battle') {{
+        if ('{mode}' !== 'battle') {{
             body.modelAId = '{model_id}';
         }}
 
@@ -599,6 +600,7 @@ class ArenaClient:
             eval_id=self.eval_id,
             modality=target_modality,
             port=self.cdp_port,
+            mode=self.active_mode,
         )
         if new_eval_id:
             self.eval_id = new_eval_id

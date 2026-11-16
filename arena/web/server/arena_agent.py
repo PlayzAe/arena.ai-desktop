@@ -1150,10 +1150,10 @@ def _native_file_bridge(files, native_state):
         if not name or name in (".", ".."):
             name = "agent-file"
         try:
-            r = requests.get(item["url"], timeout=120)
+            r = _media_get(item["url"], timeout=120)
             r.raise_for_status()
             content = r.content
-        except (requests.RequestException, OSError) as e:
+        except (requests.RequestException, OSError, ValueError) as e:
             yield _sse({"type": "notice", "model": "a",
                         "text": f"Could not download {name} from Arena Agent: {e}"})
             continue

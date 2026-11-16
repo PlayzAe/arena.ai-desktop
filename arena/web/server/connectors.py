@@ -48,6 +48,12 @@ _LINK_WIDGET_JS = r"""
   if (window.AgentHandlerLink) { start(); return 'started'; }
   var s = document.createElement('script');
   s.src = 'https://ah-cdn.merge.dev/initialize.js';
+  // No credentials to the CDN. SRI is deliberately not pinned here: Merge
+  // rotates this unversioned file (max-age=120) and the widget then loads
+  // more of itself from the same vendor, so a hash pin only breaks the
+  // OAuth flow on every deploy without containing a compromised vendor.
+  // See KNOWN_ISSUES.md ("CDN scripts") for the analysis and the durable fix.
+  s.crossOrigin = 'anonymous';
   s.onload = start;
   s.onerror = function () { fail('widget script failed to load'); };
   document.body.appendChild(s);
@@ -420,6 +426,8 @@ def api_media_save():
     """Download a generated image, video or audio file into the projects folder."""
     url = str((request.get_json(silent=True) or {}).get("url") or "")
     folder = workspace.PROJECTS_DIR / "media"
+    u = urllib.parse.urlparse(url)
+    stem = Path(u.path).stem or "media"
     try:
         if url.startswith("data:"):
             if len(url) > 10 * 1024 * 1024:
@@ -428,31 +436,20 @@ def api_media_save():
             mime = head[5:].split(";")[0]
             blob, stem = base64.b64decode(payload), "media"
         else:
-            u = urllib.parse.urlparse(url)
-            host = (u.hostname or "").lower()
-            if u.scheme != "https" or not host or host == "localhost":
-                return jsonify({"ok": False, "error": "Only https media links can be saved."}), 400
-            import ipaddress as _ipmod, socket as _sock
+            # SSRF-hardened fetch: validates every resolved address and
+            # connects to the address it validated (no DNS-rebinding gap).
             try:
-                resolved = _sock.getaddrinfo(host, None)
-                for _, _, _, _, addr in resolved:
-                    ip = _ipmod.ip_address(addr[0])
-                    _CGNAT = _ipmod.ip_network("100.64.0.0/10")
-                    if ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local \
-                            or ip in _CGNAT:
-                        return jsonify({"ok": False, "error": "Private/internal addresses not allowed."}), 400
-            except _sock.gaierror:
-                return jsonify({"ok": False, "error": "Cannot resolve hostname."}), 400
-            r = requests.get(url, timeout=60, stream=True, allow_redirects=False)
-            r.raise_for_status()
-            blob = b""
-            for chunk in r.iter_content(1 << 16):
-                blob += chunk
-                if len(blob) > 300 * 1024 * 1024:
+                blob, mime = _pinned_https_get(url)
+            except ValueError as e:
+                msg = str(e)
+                if "larger than" in msg:
                     return jsonify({"ok": False, "error": "File is larger than 300 MB."}), 413
-            mime = r.headers.get("Content-Type", "").split(";")[0]
-            stem = Path(u.path).stem or "media"
-    except (requests.RequestException, ValueError) as e:
+                if msg.startswith(("Only https", "Local addresses")):
+                    return jsonify({"ok": False, "error": "Only https media links can be saved."}), 400
+                return jsonify({"ok": False, "error": msg}), 400
+            except OSError as e:
+                return jsonify({"ok": False, "error": f"Download failed: {e}"}), 502
+    except (ValueError, OSError) as e:
         return jsonify({"ok": False, "error": f"Download failed: {e}"}), 502
     ext = mimetypes.guess_extension(mime) or Path(urllib.parse.urlparse(url).path).suffix or ".bin"
     folder.mkdir(parents=True, exist_ok=True)

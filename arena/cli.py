@@ -2,6 +2,7 @@
 Main command implementations and CLI entry point for Arena Code.
 """
 
+import json
 import os
 import sys
 import time
