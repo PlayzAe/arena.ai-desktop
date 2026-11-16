@@ -47,6 +47,7 @@ a = Analysis(
         'arena.history_sync',
         'arena.permissions',
         'arena.crypto',
+        'arena.updater',
         'arena.agent',
         'arena.workspace',
         'arena.engine',
@@ -112,4 +113,5 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon='assets/arena-cli.ico',
+    version='build/version_info.txt' if os.path.exists('build/version_info.txt') else None,
 )

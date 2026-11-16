@@ -523,6 +523,7 @@ def api_usage():
                     "current_account": _current_account_id(),
                     "days": store.get("days") or {},
                     "live": store.get("live") or {},
+                    "buckets": store.get("buckets") or {},
                     "events": list(reversed(store.get("events") or []))})
 
 

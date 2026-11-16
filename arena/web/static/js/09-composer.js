@@ -199,17 +199,17 @@
     const busy = state.generating;
     if (els.modeButton) {
       const meta = modeMeta(state.mode);
-      els.modeButton.disabled = locked || busy;
-      els.modeButton.title = locked ? 'This chat keeps the mode it started with' : meta.desc;
+      els.modeButton.disabled = busy;
+      els.modeButton.title = locked ? 'Change mode' : meta.desc;
       const modeIconNode = els.modeButton.querySelector(':scope > .icon');
       if (modeIconNode) modeIconNode.innerHTML = icon(meta.icon);
     }
     if (els.modalityButton) {
       const hiddenForAgent = state.mode === 'agent';
       els.modalityButton.hidden = hiddenForAgent;
-      els.modalityButton.disabled = locked || busy || hiddenForAgent;
+      els.modalityButton.disabled = busy || hiddenForAgent;
       els.modalityButton.title = locked
-        ? 'This chat keeps the work type it started with'
+        ? 'Changing the work type starts a new chat'
         : modalityMeta(state.modality).desc;
     }
   }
@@ -229,7 +229,15 @@
     if (mode === 'agent') {
       // Like arena.ai/agent: no model pill and no backend switch in the
       // composer. The Agent backend for NEW chats is chosen in Settings;
-      // a started chat keeps the backend it was created with.
+      // a started chat keeps the backend it was created with. As on
+      // arena.ai, a started Agent chat shows a disabled "Auto" pill whose
+      // tooltip says the selection can only change in a new chat.
+      if (chatLocked()) {
+        els.modelStrip.appendChild(el('span', {
+          class: 'model-pill model-pill-locked', 'aria-disabled': 'true', tabindex: '0',
+          title: 'Create a new chat to change the mode.'
+        }, el('span', { class: 'model-pill-label', text: 'Auto' })));
+      }
       return;
     }
     if (state.modelsLoading && !state.models.length) {
@@ -279,12 +287,9 @@
     const manual = allowsManualModels();
     els.modelsNavCount.textContent = manual && state.modelsLoading ? '…' : (manual && state.models.length ? String(state.models.length) : '—');
     if (els.modelsNavBtn) {
-      const locked = chatLocked();
-      els.modelsNavBtn.disabled = !manual || locked;
-      els.modelsNavBtn.title = locked
-        ? "Models in this chat are fixed after the first message"
-        : manual ? "Select a model for the current mode and task type" : "In this mode, model selection is disabled";
-      els.modelsNavBtn.setAttribute('aria-disabled', String(!manual || locked));
+      els.modelsNavBtn.disabled = !manual;
+      els.modelsNavBtn.title = manual ? "Select a model for the current mode and task type" : "In this mode, model selection is disabled";
+      els.modelsNavBtn.setAttribute('aria-disabled', String(!manual));
     }
   }
 
@@ -401,10 +406,10 @@
     const locked = chatLocked();
     syncWorkspaceSyncToggle();
     syncCompactChip();
-    els.modeButton.disabled = busy || locked;
-    els.modalityButton.disabled = busy || locked;
+    els.modeButton.disabled = busy;
+    els.modalityButton.disabled = busy || state.mode === 'agent';
     els.permissionButton.disabled = busy || transitions;
-    $$('[data-model-picker]', els.modelStrip || document).forEach((button) => { button.disabled = busy || locked; });
+    $$('[data-model-picker]', els.modelStrip || document).forEach((button) => { button.disabled = busy; });
     ensureBypassWarning();
   }
 
@@ -485,37 +490,7 @@
         if (els.bannerDemo) els.bannerDemo.hidden = state.demo;
       }
     }
-    updateArenaStatusBanner();
     if (els.topbarTitle) els.topbarTitle.textContent = currentViewTitle();
-  }
-
-  // status.arena.ai trouble, or arena.ai failing the session check: the
-  // chats are not broken here, arena.ai itself is down
-  function updateArenaStatusBanner() {
-    const banner = els.arenaStatusBanner;
-    if (!banner) return;
-    const info = state.arenaStatus || {};
-    const reported = Boolean(info.indicator) && !['none', 'unknown'].includes(info.indicator);
-    const down = reported || Boolean(state.arenaUnavailable);
-    const key = down ? [info.indicator, info.description, info.incident, state.arenaUnavailable].join('|') : '';
-    const blocked = els.connectionBanner && !els.connectionBanner.hidden;
-    const show = !state.demo && down && !blocked && state.arenaStatusHidden !== key;
-    banner.hidden = !show;
-    if (!show) return;
-    banner.dataset.key = key;
-    banner.classList.toggle('is-minor', reported && info.indicator === 'minor');
-    if (els.arenaStatusTitle) {
-      els.arenaStatusTitle.textContent = reported
-        ? `arena.ai: ${info.description || 'service problem'}`
-        : 'arena.ai is not answering';
-    }
-    if (els.arenaStatusText) {
-      const lines = [];
-      if (info.incident) lines.push(`${info.incident}.`);
-      if (state.arenaUnavailable) lines.push(`Your sign-in could not be checked (${state.arenaUnavailable}).`);
-      lines.push('Chats may not load or answer until arena.ai recovers.');
-      els.arenaStatusText.textContent = lines.join(' ');
-    }
   }
 
   function updateAccountUI() {
@@ -541,10 +516,6 @@
       sub = state.serverError ? 'Check the local backend' : state.loginPending ? 'Waiting for sign-in…' : 'Sign in to continue';
       avatarClass = 'is-anonymous';
     }
-    // A running account action (switch, sign-out, cookie import) shows its step here too.
-    const task = state.accountTask;
-    const taskRunning = Boolean(task && !task.error && !task.done && task.step);
-    if (taskRunning) sub = task.step;
     if (els.accountName) els.accountName.textContent = name;
     if (els.accountState) els.accountState.textContent = sub;
     if (els.accountAvatar) {
@@ -564,8 +535,6 @@
     if (els.accountButton) {
       els.accountButton.setAttribute('aria-label', `Profile: ${name}. ${sub}. Open accounts`);
       els.accountButton.setAttribute('aria-haspopup', 'menu');
-      if (taskRunning) els.accountButton.setAttribute('aria-busy', 'true');
-      else els.accountButton.removeAttribute('aria-busy');
     }
   }
 
@@ -729,28 +698,6 @@
         const isSystemInjection = userText.startsWith('[Arena Desktop]') || userText.startsWith('[Arena Desktop memory');
         const isToolResult = /^Tool results:\n?\[?\d/m.test(userText);
         const isToolContinue = userText.startsWith('Continue the task.');
-        if (isSystemInjection) {
-          const words = userWordsAfterInjection(userText);
-          if (words) {
-            newTurn({ content: words, created_at: item.created_at ?? item.createdAt ?? item.timestamp,
-              attachments: normalizeUserAttachments(item.attachments || item.experimental_attachments) });
-            continue;
-          }
-        }
-        if (isToolResult && current?.lanes?.a) {
-          // Old chats: put each result under the call it answers.
-          const results = legacyToolResults(userText);
-          const waiting = current.lanes.a.activities.filter((activity) => activity.raw?.legacy && !activity.raw.answered);
-          results.forEach((result, index) => {
-            const activity = waiting[index];
-            if (!activity) return;
-            activity.raw.answered = true;
-            activity.raw.status = result.status;
-            activity.output = result.output;
-            activity.status = result.status === 'ok' ? 'ok' : 'error';
-          });
-          if (results.length) continue;
-        }
         if (isSystemInjection || isToolResult || isToolContinue) {
           if (!current) newTurn();
           current.notices.push(isSystemInjection ? '(system context)' : '(tool exchange)');
@@ -801,13 +748,7 @@
           current.vote = item.vote || null;
           current.arenaIds = item.arena_message_ids || null;
           current.revealed = Boolean(item.names?.a || item.names?.b);
-          const savedSteps = Array.isArray(item.tools) ? item.tools.map(backfillToolStep) : [];
-          if (!savedSteps.length && /<(tool|invoke)\s+name/i.test(String(item.text || item.content || ''))) {
-            // Old chats kept the calls only as tags in the reply text.
-            const laneA = current.lanes.a || (current.lanes.a = emptyLane('a'));
-            laneA.activities.push(...legacyToolActivities(item.text || item.content));
-          }
-          for (const step of savedSteps) {
+          for (const step of (Array.isArray(item.tools) ? item.tools : [])) {
             const key = step.lane === 'b' ? 'b' : 'a';
             const lane = current.lanes[key] || (current.lanes[key] = emptyLane(key));
             const stepDetail = step.tool === 'ask_user' && step.question
@@ -1143,11 +1084,13 @@
 
   async function changeMode(nextMode) {
     if (!VALID_MODES.includes(nextMode) || nextMode === state.mode) return true;
-    if (chatLocked()) { lockedNotice('Mode'); return false; }
     if (state.generating) {
       toast('Stop the current generation first.', 'warning', 'Mode not changed');
       return false;
     }
+    // Like arena.ai: choosing another mode inside a started chat opens a
+    // new chat in that mode; the started chat stays as it was.
+    if (chatLocked() && !(await createNewChat())) return false;
     // Picking a mode never requires fixing the work type first. Agent runs
     // as Text with the work-type selector hidden; leaving Agent restores
     // the work type that was selected before it.
@@ -1192,7 +1135,6 @@
   async function changeModality(nextModality) {
     if (!VALID_MODALITIES.includes(nextModality) || nextModality === state.modality) return true;
     if (state.mode === 'agent') return true; // no work-type selector in Agent Mode
-    if (chatLocked()) { lockedNotice('Work type'); return false; }
     const issue = selectionIssue(state.mode, nextModality);
     if (issue) {
       toast(issue, 'warning', 'Combination not available in Arena');
@@ -1200,6 +1142,23 @@
     }
     if (state.generating) {
       toast('Stop the current generation first.', 'warning', 'Work type not changed');
+      return false;
+    }
+    if (chatLocked()) {
+      // arena.ai asks first, then opens a new chat for the new modality.
+      mountModal({
+        title: 'Start new chat session?',
+        size: 'small',
+        content: el('p', { class: 'modal-copy',
+          text: 'Changing modalities will start a new chat session. Your current session will be saved in your chat history.' }),
+        actions: [
+          { label: 'Cancel', variant: 'quiet' },
+          { label: 'Continue', variant: 'primary', autofocus: true,
+            onClick: async () => {
+              if (await createNewChat()) await changeModality(nextModality);
+            } }
+        ]
+      });
       return false;
     }
     const previous = state.modality;
@@ -1272,7 +1231,7 @@
 
   function selectModel(lane, modelId) {
     if (!allowsManualModels()) return false;
-    if (chatLocked()) { lockedNotice("Models"); return false; }
+    // Direct and Side by Side may swap models between messages on arena.ai.
     const model = getModel(modelId);
     if (!model) return false;
     if (lane === 'b') {

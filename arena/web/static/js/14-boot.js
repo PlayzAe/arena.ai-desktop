@@ -31,9 +31,6 @@
     els.workspacePanelTopButton = $('#workspacePanelTopButton');
     els.engineTopButton = $('#engineTopButton');
     els.connectionBanner = $('#connectionBanner');
-    els.arenaStatusBanner = $('#arenaStatusBanner');
-    els.arenaStatusTitle = $('#arenaStatusTitle');
-    els.arenaStatusText = $('#arenaStatusText');
     els.bannerTitle = $('#bannerTitle');
     els.bannerText = $('#bannerText');
     els.bannerRetry = $('#bannerRetry');
@@ -264,11 +261,6 @@
     });
     els.accountButton?.addEventListener('click', () => openAccountMenu());
     els.bannerRetry?.addEventListener('click', () => { void retryConnection(); });
-    // Hide lasts until status.arena.ai says something new
-    $('#arenaStatusHide')?.addEventListener('click', () => {
-      state.arenaStatusHidden = els.arenaStatusBanner?.dataset.key || '';
-      updateConnectionUI();
-    });
     els.demoExitBtn?.addEventListener('click', () => { window.location.href = window.location.pathname; });
     els.bannerDemo?.addEventListener('click', () => { /* Navigation to ?demo=1 is the explicit opt-in. */ });
 
@@ -609,7 +601,7 @@
   async function runFirstRunSetup() {
     let settings = {};
     try { settings = await API.getSettings(); } catch { return; }
-    if (settings?.setup_done) return;
+    if (settings?.setup_done || navigator.webdriver) return; // automated browsers (tests) never see the one-time overlay
 
     const overlay = el('div', { class: 'setup-overlay', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'setupTitle' });
     const list = el('ol', { class: 'setup-steps' });

@@ -109,6 +109,7 @@ def _native_create_session(message, timezone, connectors, files=None):
             LOG.info("native create [%s]: HTTP %s %s", label, r.status_code,
                      " ".join((text or "").split())[:300])
             if r.status_code == 200:
+                _usage_record_headers(getattr(r, "headers", None), "agent")
                 try:
                     payload = json.loads(text)
                 except ValueError:

@@ -34,12 +34,76 @@
     API.updateCheck().then((info) => {
       state.updateInfo = info;
       if (info?.enabled !== false && info?.update && info?.latest) {
-        showUpdateIsland(info.latest, info.url);
+        showUpdateIsland(info.latest, info.url, info);
       }
     }).catch(() => {});
   }
 
-  function showUpdateIsland(version, url) {
+  function showWhatsNewOnce() {
+    if (state.demo) return;
+    API.whatsNew().then((data) => {
+      if (!data?.version) return;
+      const notes = Array.isArray(data.notes) ? data.notes : [];
+      const content = el('div', {},
+        el('p', { class: 'modal-copy', text: `Arena Desktop updated from ${data.from || 'the previous version'} to ${data.version}.` }),
+        notes.length
+          ? el('ul', { class: 'update-notes' }, ...notes.map((n) => el('li', { text: n })))
+          : el('p', { class: 'modal-note', text: 'No release notes were published for this version.' }));
+      setTimeout(() => mountModal({
+        title: `Updated to ${data.version}`, subtitle: 'Here is what is new', content,
+        actions: [{ label: 'Got it', variant: 'primary', autofocus: true }],
+        onClose: () => { API.clearWhatsNew().catch(() => {}); }
+      }), 900);
+    }).catch(() => {});
+  }
+
+  function openUpdateModal(info) {
+    const notes = Array.isArray(info.notes) ? info.notes : [];
+    const hint = el('p', { class: 'modal-note', text: info.can_install
+      ? 'One click: the app downloads the update, closes, installs it and opens again by itself. Your chats and settings stay.'
+      : 'Open the download page to get this version.' });
+    const content = el('div', {},
+      el('p', { class: 'modal-copy', text: `Version ${info.latest} is ready. You have ${info.current}.` }),
+      notes.length ? el('h3', { class: 'modal-section-title', text: 'What is new' }) : null,
+      notes.length ? el('ul', { class: 'update-notes' }, ...notes.map((n) => el('li', { text: n }))) : null,
+      hint);
+    const fill = el('span', { class: 'update-bar-fill' });
+    const bar = el('div', { class: 'update-bar is-wait', hidden: true, role: 'progressbar', 'aria-label': 'Download progress' }, fill);
+    content.appendChild(bar);
+    const install = async () => {
+      bar.hidden = false;
+      const start = await API.updateDownload();
+      if (!start?.ok) throw new Error(start?.error || 'Could not start the download.');
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 400));
+        const st = await API.updateStatus();
+        if (st.state === 'error') throw new Error(st.error || 'Download failed.');
+        if (st.state === 'ready') break;
+        const pct = st.total ? Math.floor((st.done / st.total) * 100) : 0;
+        bar.classList.toggle('is-wait', pct === 0);
+        fill.style.width = `${pct}%`;
+        bar.setAttribute('aria-valuenow', String(pct));
+        const mb = (n) => (n / 1048576).toFixed(1);
+        hint.textContent = st.total ? `Downloading… ${mb(st.done)} of ${mb(st.total)} MB` : 'Starting the download…';
+      }
+      bar.classList.remove('is-wait'); fill.style.width = '100%';
+      hint.textContent = 'Installing and restarting…';
+      const res = await API.updateApply();
+      if (!res?.ok) throw new Error(res?.error || 'Could not start the update.');
+      return false;
+    };
+    mountModal({
+      title: 'Update available', subtitle: `Arena Desktop ${info.latest}`, content,
+      actions: [
+        { label: 'Later' },
+        info.can_install
+          ? { label: 'Update now', variant: 'primary', icon: 'download', autofocus: true, onClick: install }
+          : { label: 'Open download page', variant: 'primary', icon: 'external', onClick: async () => { window.open(info.url, '_blank', 'noopener'); } }
+      ]
+    });
+  }
+
+  function showUpdateIsland(version, url, info) {
     const existing = document.querySelector('.update-island');
     if (existing) existing.remove();
     const island = el('div', { class: 'update-island', title: 'Click to download the update' });
@@ -50,7 +114,8 @@
     close.addEventListener('click', (e) => { e.stopPropagation(); island.remove(); });
     island.appendChild(close);
     island.addEventListener('click', () => {
-      if (url) window.open(url, '_blank', 'noopener');
+      if (info?.can_install) openUpdateModal(info);
+      else if (url) window.open(url, '_blank', 'noopener');
       else openSettings('about');
     });
     document.body.appendChild(island);
@@ -140,8 +205,6 @@
           || (status.accounts.find((a) => a.current) || {}).id || null;
       }
       state.permissionCount = status.pending_permissions;
-      state.arenaStatus = status.arena_status;
-      state.arenaUnavailable = status.arena_unavailable;
       if (status.workspace) state.workspace = status.workspace;
       state.workspaceChosen = Boolean(status.workspace_chosen);
       if (status.app_version) {
@@ -179,6 +242,7 @@
       if (initial) {
         applyStartModeParam();
         checkForUpdatesOnce();
+        showWhatsNewOnce();
       }
       if (!initial && (oldMode !== state.mode || oldModality !== state.modality)) loadModels(state.modality, { quiet: true });
       return status;

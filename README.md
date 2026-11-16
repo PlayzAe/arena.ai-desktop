@@ -12,7 +12,7 @@
 <div align="center">
   <a href="https://github.com/PlayzAe/arena.ai-desktop/stargazers"><img src="https://img.shields.io/github/stars/PlayzAe/arena.ai-desktop?style=flat-square&color=crimson" alt="GitHub stars" /></a>
   <a href="https://github.com/PlayzAe/arena.ai-desktop/releases/latest"><img src="https://img.shields.io/github/v/release/PlayzAe/arena.ai-desktop?style=flat-square" alt="Latest release" /></a>
-  <img src="https://img.shields.io/badge/version-1.5.0-brightgreen?style=flat-square" alt="v1.5.0" />
+  <img src="https://img.shields.io/badge/version-1.6.0-brightgreen?style=flat-square" alt="v1.5.0" />
   <img src="https://img.shields.io/badge/models-400%2B-10B981?style=flat-square" alt="400+ models" />
   <img src="https://img.shields.io/badge/Platform-Windows_(macOS%20%26%20Linux%20planned)-blue?style=flat-square" alt="Platform" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="MIT license" /></a>
@@ -32,6 +32,7 @@
 ## Contents
 
 - [Download](#download)
+- [What's new in v1.6.0](#whats-new-in-v160)
 - [What's new in v1.5.0](#whats-new-in-v150)
 - [What it does](#what-it-does)
 - [How it works](#how-it-works)
@@ -42,6 +43,34 @@
 - [Limitations](#limitations)
 - [Roadmap: macOS and Linux](#roadmap-macos-and-linux)
 - [Translations](#translations)
+
+## What's new in v1.6.0
+
+### Code mode saves the whole project
+- Arena's starter files (`package.json`, `tsconfig.json`, `vite.config.ts`, `index.html`, `src/main.tsx`, `src/App.tsx`, `src/utils/cn.ts`) are saved next to the files the AI writes, in one folder.
+- Images saved under `public/` are downloaded. `cp`, `mv` and `mkdir` from the sandbox are repeated locally.
+- `npm install` runs on your PC (automatic in Accept edits and Bypass permissions, asks in other modes, never in Plan mode). Use **Run on this PC** to start the dev server and **Stop** to end it.
+- Your own files are never overwritten by Arena's starter files.
+
+### Install and update in one click
+- `Arena-Desktop-Setup.exe` installs for your account (Start Menu and optional Desktop shortcut, entry in Settings > Apps, no admin rights).
+- When a newer version is released, **Update now** downloads it with a progress bar, checks its SHA-256, closes the app, installs it, reopens it and shows what is new.
+- Uninstall can also delete your chats, settings and saved sign-ins. Project folders are never touched.
+
+### Connectors and MCP
+- HTTP MCP servers connect (JSON or SSE replies, session ids, custom headers).
+- Arena connector sign-in opens your default browser and closes itself when it worked.
+
+### Interface
+- Claude Code–style tool rows: orange `✻` while working, green `●` steps with a `⎿` summary, white `●` for the answer.
+- Usage shows each Arena limit separately: Chat / Code / Direct / Battle and Agent, with remaining count and reset time.
+
+### Build from source
+```powershell
+python scripts/build.py                 # builds dist/release/ (exe, installer, .sha256)
+python scripts/build.py --bump patch    # raise the version first (patch | minor | major)
+```
+The version lives only in `arena/__init__.py`.
 
 ## What's new in v1.5.0
 
@@ -159,7 +188,8 @@ Every build is on the [releases page](https://github.com/PlayzAe/arena.ai-deskto
 
 | Platform | Download | Notes |
 | --- | --- | --- |
-| Windows 10 / 11 | `Arena-Desktop.exe` | Standalone, no installer. Requires Edge WebView2 (built into Windows 11). |
+| Windows 10 / 11 | `Arena-Desktop-Setup.exe` | Installer with shortcuts and one-click updates. Requires Edge WebView2 (built into Windows 11). |
+| Windows 10 / 11 | `Arena-Desktop.exe` | Portable single file. The in-app updater downloads this one. |
 
 If Windows SmartScreen warns: click **More info → Run anyway** (the EXE is not code-signed).
 
@@ -250,6 +280,8 @@ py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pytest tests --ignore=tests/test_ui_browser.py   # unit/API
 $env:RUN_BROWSER_TESTS=1; .\.venv\Scripts\python.exe -m pytest tests/test_ui_browser.py  # UI (demo mode)
 ```
+
+The UI tests need `pip install playwright` and `python -m playwright install chromium` once.
 
 ## Troubleshooting
 

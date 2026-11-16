@@ -1356,7 +1356,8 @@ def _arena_connectors_fake(appmod, monkeypatch, state):
             state["github_on"] = True
             return {"connectors": [{"slug": "github", "authStatus": "connected"}]}, None, 200
         if path.endswith("/link-token") and method == "POST":
-            return {"linkToken": "tok-123"}, None, 200
+            return {"linkToken": "tok-123",
+                    "authUrl": state.get("auth_url", "https://ah-api.merge.dev/magic-link/tok-123/")}, None, 200
         if method == "DELETE":
             return {"success": True}, None, 200
         raise AssertionError(f"unexpected Arena call: {method} {path}")
@@ -1389,66 +1390,53 @@ def test_arena_connector_disconnect_uses_delete(web, monkeypatch):
     assert c.post("/api/arena-connectors/bad%20slug/disconnect", json={}).status_code in (400, 404)
 
 
-def test_arena_connector_connect_requires_engine(web, monkeypatch):
-    appmod, c, *_ = web
-    _arena_connectors_fake(appmod, monkeypatch, {})
-    r = c.post("/api/arena-connectors/github/connect", json={})
-    assert r.status_code == 400
-    payload = r.get_json()
-    assert payload["code"] == "engine_required" and payload["fallback_url"].endswith("/agent")
-
-
-class _FakeLinkEngine:
-    def __init__(self):
-        self.window = object()
-        self.challenge = None
-        self.shown = False
-        self.hidden = False
-        self.scripts = []
-        self.link_state = '{"state": "open", "error": null}'
-
-    def ready(self):
-        return True
-
-    def wait_ready(self, timeout=30):
-        return True
-
-    def show(self):
-        self.shown = True
-
-    def hide(self):
-        self.hidden = True
-
-    def run_script(self, script):
-        self.scripts.append(script)
-        if "JSON.stringify(window.__apLink)" in script:
-            return self.link_state
-        return "started"
-
-
-def test_arena_connector_connect_opens_widget_and_polls_to_connected(web, monkeypatch):
+def test_arena_connector_connect_opens_default_browser_and_polls_to_connected(web, monkeypatch):
     appmod, c, *_ = web
     state = {}
     _arena_connectors_fake(appmod, monkeypatch, state)
-    engine = _FakeLinkEngine()
-    monkeypatch.setattr(appmod, "ENGINE", engine)
+    opened = []
+    monkeypatch.setattr(appmod.webbrowser, "open", lambda url, *a, **k: opened.append(url) or True)
     appmod._connector_link_pending = None
 
     r = c.post("/api/arena-connectors/github/connect", json={})
-    assert r.status_code == 200 and r.get_json() == {"ok": True, "pending": True, "slug": "github"}
-    assert engine.shown is True
-    widget = next(s for s in engine.scripts if "AgentHandlerLink" in s)
-    assert "tok-123" in widget and "ah-cdn.merge.dev/initialize.js" in widget
+    assert r.status_code == 200
+    assert r.get_json() == {"ok": True, "pending": True, "slug": "github", "browser": True, "opened": True}
+    assert opened == ["https://ah-api.merge.dev/magic-link/tok-123/"]
 
+    # Not connected yet: the poll keeps waiting.
     poll = c.get("/api/arena-connectors/github/connect/poll").get_json()
     assert poll["done"] is False and poll["connected"] is False
 
-    engine.link_state = '{"state": "success", "error": null}'
+    # A while later the poll asks Arena to sync; the connector now reports
+    # connected, so the flow finishes.
+    appmod._connector_link_pending["last_sync"] -= 60
     poll = c.get("/api/arena-connectors/github/connect/poll").get_json()
-    assert poll["done"] is True and poll["connected"] is True
     assert ("POST", "/api/connectors/sync") in state["calls"]
-    assert engine.hidden is True
+    assert poll["done"] is True and poll["connected"] is True
     assert appmod._connector_link_pending is None
+
+
+def test_arena_connector_connect_reports_unopenable_browser(web, monkeypatch):
+    appmod, c, *_ = web
+    _arena_connectors_fake(appmod, monkeypatch, {})
+    monkeypatch.setattr(appmod.webbrowser, "open", lambda *a, **k: False)
+    appmod._connector_link_pending = None
+    body = c.post("/api/arena-connectors/github/connect", json={}).get_json()
+    assert body["ok"] is True and body["opened"] is False
+    assert body["auth_url"] == "https://ah-api.merge.dev/magic-link/tok-123/"
+
+
+def test_arena_connector_connect_rejects_foreign_auth_url(web, monkeypatch):
+    appmod, c, *_ = web
+    state = {"auth_url": "https://evil.example/magic-link/tok-123/"}
+    _arena_connectors_fake(appmod, monkeypatch, state)
+    opened = []
+    monkeypatch.setattr(appmod.webbrowser, "open", lambda url, *a, **k: opened.append(url) or True)
+    r = c.post("/api/arena-connectors/github/connect", json={})
+    assert r.status_code == 502 and r.get_json()["code"] == "no_auth_url"
+    state["auth_url"] = "http://ah-api.merge.dev/magic-link/tok-123/"
+    assert c.post("/api/arena-connectors/github/connect", json={}).status_code == 502
+    assert opened == []
 
 
 # ---------- v4.2: Direct tools toggle, native Arena Agent, cloud labels ----------
@@ -1923,10 +1911,9 @@ def test_native_agent_imported_chat_drains_backlog_then_continues(web, monkeypat
 
 # ---------- v4.6: chat lock, battle vote, snapshot cursor ----------
 
-def test_started_chat_keeps_mode_modality_and_model(web):
-    # After the first message a chat is locked to its stored selection:
-    # a follow-up asking for another mode/model continues the very same
-    # Arena conversation with the original parameters instead.
+def test_started_chat_keeps_mode_and_modality_but_may_swap_model(web):
+    # After the first message a chat keeps its mode and modality (arena.ai
+    # opens a new chat for those); Direct / Side by Side may swap models.
     appmod, c, _, use, sent = web
     appmod._ui_mode, appmod._ui_modality = "direct", "text"
     use(FakeResp(['a0:"First"']))
@@ -1940,10 +1927,10 @@ def test_started_chat_keeps_mode_modality_and_model(web):
         "modality": "image", "model_id": "m2"}))
     assert ev[0]["mode"] == "direct" and ev[-1]["text_a"] == "Second"
     assert sent[-1][0].endswith(f"/post-to-evaluation/{eval_id}")
-    assert sent[-1][1]["modelAId"] == "m1"
+    assert sent[-1][1]["modelAId"] == "m2"
     saved = appmod._load_chat(chat_id)
     assert saved["mode"] == "direct" and saved["modality"] == "text"
-    assert saved["model_a"] == "m1" and saved["eval_id"] == eval_id
+    assert saved["model_a"] == "m2" and saved["eval_id"] == eval_id
     assert [m["text"] for m in saved["messages"] if m["role"] == "user"] == ["hi", "again"]
 
 

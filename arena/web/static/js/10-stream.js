@@ -27,6 +27,9 @@
     const existing = lane.activities.find((item) => String(item.id) === String(id));
     if (existing) {
       Object.assign(existing, { status: activity.status, detail: activity.detail || existing.detail, command: activity.command || existing.command, path: activity.path || existing.path, url: activity.url || existing.url, output: activity.output || existing.output });
+      // The complete call replaces the empty first one; the row keeps its place in the text.
+      const at = existing.raw && Number.isFinite(existing.raw.at) ? existing.raw.at : activity.raw.at;
+      existing.raw = { ...(existing.raw || {}), ...activity.raw, at };
       return existing;
     }
     lane.activities.push(activity);
@@ -202,6 +205,9 @@
       return;
     }
     if (type === 'tool_result') {
+      if (/write|edit|patch|create|delete|remove|move|rename|mkdir|bash|shell|command|run/i.test(String(event.tool || event.name || ''))) {
+        scheduleWorkspaceTreeRefresh();
+      }
       const id = event.id ?? event.tool_call_id ?? event.call_id;
       // Backend tool_result has no call id: match the most recent pending call by tool.
       const existing = id ? lane.activities.find((item) => String(item.id) === String(id)) :
@@ -377,7 +383,7 @@
         lane.artifacts.push(artifact);
         addArtifactRecord(artifact, key);
       });
-      if (list.length) void refreshWorkspacePanel?.();
+      if (list.length) scheduleWorkspaceTreeRefresh();
       scheduleChatRender();
       return;
     }
@@ -911,6 +917,31 @@
     }));
   }
 
+  function askCodeWorkspaceSync() {
+    const chatKey = String(state.activeChatId || 'new');
+    const hasFolder = Boolean(state.workspaceChosen);
+    const resend = () => { state.codeSyncAskedFor = chatKey; window.setTimeout(() => { void sendMessage(); }, 0); };
+    mountModal({
+      title: 'Save the generated files on this computer?',
+      subtitle: 'Workspace Sync',
+      size: 'small',
+      content: el('div', {},
+        el('p', { class: 'modal-copy', text: 'Code chats build a project on Arena’s servers. Workspace Sync copies the files the AI writes into the folder you chose on this computer, so you can open and run them here.' }),
+        el('p', { class: 'modal-copy', text: hasFolder
+          ? 'Workspace Sync is off, so the files would only exist on Arena’s sandbox (you can still preview them on arena.ai).'
+          : 'No folder is chosen yet, so the files would only exist on Arena’s sandbox (you can still preview them on arena.ai).' })),
+      actions: [
+        { label: 'Cancel', variant: 'quiet' },
+        { label: 'Send without saving files', variant: 'quiet', onClick: () => { resend(); } },
+        { label: hasFolder ? 'Turn on Workspace Sync' : 'Choose a folder', variant: 'primary', autofocus: true,
+          onClick: () => {
+            if (hasFolder) { setWorkspaceSync(true); resend(); }
+            else { state.directTools = true; openWorkspacePopover(els.workspaceButton); }
+          } }
+      ]
+    });
+  }
+
   async function sendMessage() {
     if (state.starting) return;
     if (chatIsGenerating(state.activeChatId)) {
@@ -991,6 +1022,15 @@
         } else {
           toast("The server is not yet ready for Battle.", 'warning');
         }
+        return;
+      }
+
+      // First Code message while Workspace Sync cannot save files here: the
+      // generated project would stay on Arena's sandbox. Explain and ask once.
+      if (state.modality === 'code' && state.mode !== 'agent' && !chatLocked()
+          && !(state.directTools && state.workspaceChosen)
+          && state.codeSyncAskedFor !== String(state.activeChatId || 'new')) {
+        askCodeWorkspaceSync();
         return;
       }
 

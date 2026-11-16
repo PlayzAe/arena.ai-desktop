@@ -102,39 +102,58 @@ def _usage_note_429(conv, err) -> None:
         pass
 
 
+def _num(value):
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _usage_record_headers(headers, bucket: str = "evaluation"):
+    """Keep what Arena's ratelimit headers say, per bucket.
+
+    Arena counts Chat/Code/Direct/Battle sends in one bucket (create-evaluation, 30 per window at the time of
+    writing) and Agent sessions in another (create-chat, 10). Each reply carries that bucket's
+    limit, remaining and reset (epoch seconds). Returns the entry stored, or None."""
+    if not headers:
+        return None
+    try:
+        h = {str(k).lower(): v for k, v in dict(headers).items()}
+    except (TypeError, ValueError):
+        return None
+    entry = {"limit": _num(h.get("ratelimit-limit")), "remaining": _num(h.get("ratelimit-remaining")),
+             "reset": _num(h.get("ratelimit-reset"))}
+    if entry["remaining"] is None and entry["reset"] is None:
+        return None
+    entry = {k: v for k, v in entry.items() if v is not None}
+    entry["ts"] = time.time()
+    try:
+        account_id, email = _usage_account()
+        store = _usage()
+        store.setdefault("buckets", {}).setdefault(account_id, {})[bucket] = entry
+        live = store.setdefault("live", {})
+        live[account_id] = dict(entry, email=email, bucket=bucket,
+                                **({"modality": h["ratelimit-modality"]} if h.get("ratelimit-modality") else {}))
+    except Exception:
+        pass
+    return entry
+
+
 def _emit_usage_from_headers(headers: dict, conv: dict):
     """Emit a usage SSE event from the ratelimit headers arena.ai already sent."""
     if not headers:
         return
     try:
-        rl_remaining = headers.get("ratelimit-remaining")
-        rl_reset = headers.get("ratelimit-reset")
-        rl_modality = headers.get("ratelimit-modality")
-        if rl_remaining is None and rl_reset is None:
+        entry = _usage_record_headers(headers, "evaluation")
+        if entry is None:
             return
-        evt = {"type": "usage"}
-        if rl_remaining is not None:
-            try:
-                evt["remaining"] = int(float(rl_remaining))
-            except (TypeError, ValueError):
-                evt["remaining_raw"] = str(rl_remaining)
-        if rl_reset is not None:
-            try:
-                evt["reset"] = int(float(rl_reset))
-            except (TypeError, ValueError):
-                evt["reset_raw"] = str(rl_reset)
-        if rl_modality:
-            evt["modality"] = str(rl_modality)
-        account_id, email = _usage_account()
-        try:
-            live = _usage().setdefault("live", {})
-            live[account_id] = {k: evt.get(k) for k in ("remaining", "reset", "modality")
-                                if evt.get(k) is not None}
-            live[account_id].update({"ts": time.time(), "email": email})
-        except Exception:
-            pass
-        day = _usage_day()
-        acct = day.get(account_id)
+        h = {str(k).lower(): v for k, v in dict(headers).items()}
+        evt = {"type": "usage", "bucket": "evaluation"}
+        evt.update({k: entry[k] for k in ("remaining", "limit", "reset") if k in entry})
+        if h.get("ratelimit-modality"):
+            evt["modality"] = str(h["ratelimit-modality"])
+        account_id, _email = _usage_account()
+        acct = _usage_day().get(account_id)
         if acct:
             evt["sends_today"] = int(acct.get("sends") or 0)
             evt["rate_limits_today"] = int(acct.get("rate_limits") or 0)

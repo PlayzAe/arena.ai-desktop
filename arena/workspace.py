@@ -46,13 +46,22 @@ def _read(path: Path) -> str:
 
 def webdev_files(item: Dict[str, Any]) -> List[Dict[str, Any]]:
     holders = [item]
-    for key in ("data", "manifest"):
+    # Arena now sends {"type": "webdev", "event": {"type": "init", "files": [...]}}.
+    for key in ("event", "data", "manifest"):
         if isinstance(item.get(key), dict):
             holders.append(item[key])
     for holder in holders:
         if isinstance(holder.get("files"), list):
             return [f for f in holder["files"] if isinstance(f, dict)]
     return []
+
+
+def webdev_event_type(item: Dict[str, Any]) -> str:
+    """The kind of a webdev event: Arena sends it as a string or as {"type": ...}."""
+    ev = item.get("event")
+    if isinstance(ev, dict):
+        return str(ev.get("type") or "")
+    return str(ev or "")
 
 
 def _manifest(root: Path) -> set:
@@ -95,7 +104,7 @@ def plan_project(root: Path, files) -> Dict[str, Any]:
             "skipped": skipped, "files": sorted(new)}
 
 
-def apply_project(plan: Dict[str, Any], write: bool = True, delete: bool = True) -> Tuple[int, int]:
+def apply_project(plan: Dict[str, Any], write: bool = True, delete: bool = True, track: bool = True) -> Tuple[int, int]:
     root = Path(plan["root"])
     written = deleted = 0
     if write:
@@ -110,7 +119,7 @@ def apply_project(plan: Dict[str, Any], write: bool = True, delete: bool = True)
             if target.is_file():
                 target.unlink()
                 deleted += 1
-    if write or delete:
+    if (write or delete) and track:
         if write:
             tracked = set(plan["files"]) | (set() if delete else set(plan["deletes"]))
         else:

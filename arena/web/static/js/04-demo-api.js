@@ -224,6 +224,11 @@
       if ('enabled' in body) demoStore.memoryEnabled = Boolean(body.enabled);
       return { ok: true, enabled: demoStore.memoryEnabled !== false, demo: true };
     },
+    async updateDownload() { return { ok: false, error: 'Updates are disabled in demo mode.', demo: true }; },
+    async updateStatus() { return { state: 'idle', demo: true }; },
+    async updateApply() { return { ok: false, demo: true }; },
+    async whatsNew() { return {}; },
+    async clearWhatsNew() { return { ok: true }; },
     async updateCheck() { await sleep(60); return { enabled: true, current: 'demo', latest: null, update: false, url: null, demo: true }; },
     async exportSettings() { await sleep(60); return { app: 'Arena Desktop', version: 1, config: {}, memory_global: demoStore.memoryGlobal || '', memory_workspace: demoStore.memoryWorkspace || '', mcp: null, demo: true }; },
     async importSettings(bundle = {}) { await sleep(60); if (typeof bundle.memory_global === 'string') demoStore.memoryGlobal = bundle.memory_global; return { ok: true, backup: 'demo', demo: true }; },
@@ -873,10 +878,6 @@ You can start with a more structured option: one script, short captions, and a c
     accounts: [],
     currentAccountId: null,
     accountBusy: false,
-    accountTask: null,
-    arenaStatus: null,
-    arenaUnavailable: null,
-    arenaStatusHidden: '',
     pendingPermissions: [],
     permissionCount: 0,
     decidingPermissions: new Set(),

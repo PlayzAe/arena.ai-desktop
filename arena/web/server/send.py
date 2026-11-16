@@ -247,11 +247,11 @@ def _api_chat_impl():
     if chat_ws is not None and old_ws and existing.get("tools_guide") and Path(old_ws) != chat_ws:
         ws_note = (f"[Arena Desktop] This chat's project folder is now {chat_ws} (before: {old_ws}). "
                    "Tool paths are relative to the new folder.\n")
-    # A started chat keeps its mode, modality and models, like on the Arena
-    # website: the composer's selection only applies to new chats.  Forcing
-    # the stored values here means a follow-up can never silently fork a
-    # different Arena conversation or switch models mid-chat; changing any
-    # of them requires a new chat.
+    # A started chat keeps its mode and modality, like on the Arena website
+    # (picking another one there opens a new chat).  Forcing the stored
+    # values here means a follow-up can never silently fork a different Arena
+    # conversation.  Only the Direct / Side by Side models may change
+    # between messages, exactly as on arena.ai.
     locked = any(isinstance(m, dict) and m.get("role") in ("user", "assistant")
                  for m in (existing.get("messages") or []))
     # The composer sends its visible selection with every request.  Honoring it
@@ -302,7 +302,11 @@ def _api_chat_impl():
         model_a = fanout_models[0]
     if locked:
         if _ui_mode in ("direct", "side-by-side"):
-            model_a, model_b = existing.get("model_a"), existing.get("model_b")
+            # arena.ai lets Direct and Side by Side swap models between
+            # messages (the follow-up carries the new modelAId/modelBId);
+            # a missing pick keeps the chat's current model.
+            model_a = model_a or existing.get("model_a")
+            model_b = (model_b or existing.get("model_b")) if _ui_mode == "side-by-side" else None
         elif _ui_mode in ("battle", "agent"):
             model_a = model_b = None
 
@@ -574,6 +578,9 @@ def _api_chat_impl():
         yield _sse({"type": "meta", "dual": dual, "mode": ui_mode, "modality": ui_modality,
                     "chat_id": conv["chat_id"], "permission_mode": _perm_mode(), "names": names})
         send = (conv.get("prefix") or "") + message
+        if modality == "webdev" and conv["new"]:
+            send = ("[Arena Desktop] The user's computer only receives text files you write and images saved under public/. "
+                    "Save every generated image or other binary file under public/ (for example public/images/hero.jpg).\n") + send
         if modality == "webdev" and not dual and not conv["new"]:
             changed, note = _local_edits(_code_root(conv["chat_id"], conv["title"], "a", conv["mode"]))
             if changed:
@@ -587,6 +594,8 @@ def _api_chat_impl():
         else:
             out = yield from _turn_auto(client, send, conv)
         out = out or {"a": "", "b": ""}
+        if modality == "webdev":
+            yield from _finish_sandbox(conv)
         if modality == "webdev" and not conv.get("_preview_sent") and not dual:
             yield from _poll_webdev_preview(client, conv)
         # conv carries this chat's own Arena session id; the shared client

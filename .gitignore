@@ -21,3 +21,21 @@ RELEASE_v*.md
 
 # test checklist
 TESTS_v*.md
+
+# local research dumps of arena.ai responses (contain account ids); never committed
+chunks/
+
+# files the app and its tests write into project folders
+node_modules/
+.arena-artifacts/
+.arena-files.json
+.env
+.env.*
+*.part
+*.log
+playwright-report/
+test-results/
+
+# test fixtures recorded from real arena.ai streams
+!tests/data/
+!tests/data/**

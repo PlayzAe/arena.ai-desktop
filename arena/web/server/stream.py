@@ -494,10 +494,22 @@ def _preview_url(root: Path):
     return f"http://127.0.0.1:{_preview['port']}/{urllib.parse.quote(rel)}/index.html"
 
 
-def _save_webdev(lane: str, files: list, conv: dict):
-    """Mirror a code answer into its local project folder, asking first unless the mode allows edits."""
-    root = workspace.project_dir(conv["chat_id"], conv["title"], lane, base=_chosen_ws())
+def _save_webdev(lane: str, files: list, conv: dict, template: bool = False):
+    """Mirror a code answer into the folder the tool-written files use, asking first unless the mode allows edits.
+
+    `template` is Arena's starter project (the init event): it only creates missing files, never overwrites
+    or deletes anything already in the folder."""
+    root = _code_root(conv["chat_id"], conv["title"], lane, conv["mode"])
     plan = workspace.plan_project(root, files)
+    man = _sync_load(root)
+    kept_existing = 0
+    if template:
+        plan["deletes"] = []
+        for rel in list(plan["writes"]):
+            target = root / rel
+            if target.is_file() and (rel not in man or _digest(target.read_bytes()) != man[rel]):
+                del plan["writes"][rel]
+                kept_existing += 1
     mode = _perm_mode()
     write = delete = False
     if plan["writes"]:
@@ -510,24 +522,44 @@ def _save_webdev(lane: str, files: list, conv: dict):
             "tool": "delete", "path": str(root), "rel": root.name, "inside": True,
             "summary": f"Remove {len(plan['deletes'])} file(s) the new answer dropped from {root}",
             "files": plan["deletes"][:50]})) == "allow"
-    written, deleted = workspace.apply_project(plan, write=write, delete=delete) if (write or delete) else (0, 0)
+    written, deleted = workspace.apply_project(plan, write=write, delete=delete, track=not template) if (write or delete) else (0, 0)
     saved = write or not plan["writes"]
+    if saved:
+        man = _sync_load(root)
+        for rel in plan["files"]:
+            target = root / rel
+            if target.is_file() and rel not in man:
+                man[rel] = _digest(target.read_bytes())
+        _sync_save(root, man)
+        if conv.get("mirror_ok") is None:
+            conv["mirror_ok"] = True
     yield _sse({"type": "files_written", "model": lane, "root": str(root), "written": written, "deleted": deleted,
                 "unchanged": plan["unchanged"], "skipped": plan["skipped"], "saved": saved,
                 "files": plan["files"], "preview": _preview_url(root) if saved else None})
+    if kept_existing:
+        yield _sse({"type": "notice", "text": f"Kept {kept_existing} file(s) already in {root} instead of overwriting them with Arena's starter files."})
 
 
 def _webdev_event(lane: str, item: dict, conv: dict):
-    event = item.get("event")
-    if event == "title" and isinstance(item.get("title"), str):
-        conv["title"] = item["title"][:80]
-    yield _sse({"type": "webdev", "model": lane, "event": event, "data": item})
+    etype = workspace.webdev_event_type(item)
+    ev = item.get("event")
+    title = item.get("title") or (ev.get("title") if isinstance(ev, dict) else None)
+    if etype == "title" and isinstance(title, str):
+        conv["title"] = title[:80]
+    yield _sse({"type": "webdev", "model": lane, "event": ev, "data": item})
     files = workspace.webdev_files(item)
     if files:
-        _last_webdev[(conv["chat_id"], lane)] = {"title": conv["title"], "files": files}
-        yield from _save_webdev(lane, files, conv)
+        key = (conv["chat_id"], lane)
+        if isinstance(ev, dict) and key in _last_webdev:
+            known = {f.get("path"): f for f in _last_webdev[key]["files"]}
+            known.update({f.get("path"): f for f in files})
+            files_all = list(known.values())
+        else:
+            files_all = files
+        _last_webdev[key] = {"title": conv["title"], "files": files_all}
+        yield from _save_webdev(lane, files, conv, template=isinstance(ev, dict))
     url = contracts.find_preview_url(item)
-    if event == "preview-ready" or url:
+    if etype == "preview-ready" or url:
         if url:
             conv["_preview_sent"] = True
         yield _sse({"type": "preview", "model": lane, "url": url, "status": item.get("status"),
@@ -666,6 +698,9 @@ def _sandbox_call(lane: str, call: dict, conv: dict):
     into the local project folder, and show the step as an activity row like arena.ai's."""
     op = contracts.sandbox_op(call)
     LOG.info("chat %s sandbox %s %s %s", conv["chat_id"][:8], lane, op["tool"], op.get("path") or op.get("detail", ""))
+    if op.get("id") and (op["kind"] in ("run", "npm") and (op.get("command") or op.get("packages"))
+                         or op["kind"] == "touch" and op.get("path")):
+        conv.setdefault("sb_ops", {})[op["id"]] = {"op": op, "lane": lane}  # the complete call replaces the empty first one
     row = {"id": op["id"], "kind": op["kind"], "tool": op["tool"], "path": op.get("path"), "detail": op.get("detail"),
            "verb": _SB_VERB.get(op["kind"], op["tool"])}
     if op["kind"] in ("write", "edit") and not (op.get("content") or op.get("old")):
@@ -726,8 +761,15 @@ def _sandbox_call(lane: str, call: dict, conv: dict):
         except (OSError, ValueError, requests.RequestException) as e:
             row["error"] = str(e)[:160]
     rows = conv.setdefault("sandbox", [])
+    at = (conv.get("_text_at") or {}).get(lane)
     if row["id"]:
+        # arena.ai sends each call twice; the row keeps the offset of the first one.
+        for r in rows:
+            if r.get("id") == row["id"] and r.get("model") == lane and isinstance(r.get("at"), int):
+                at = r["at"]
         rows[:] = [r for r in rows if not (r.get("id") == row["id"] and r.get("model") == lane)]
+    if isinstance(at, int):
+        row["at"] = at
     rows.append(dict(row, model=lane))
     yield _sse(dict(row, type="sandbox", model=lane))
     # present_file or newly written HTML: emit a local preview event
@@ -778,6 +820,121 @@ def _sandbox_result(lane: str, res: dict, conv: dict):
     if url and url not in conv.setdefault("previews", set()):
         conv["previews"].add(url)
         yield _sse({"type": "preview", "model": lane, "url": url})
+
+
+def _mirror_allowed(conv: dict, root: Path, lane: str):
+    if conv.get("mirror_ok") is None:
+        info = {"tool": "write_file", "summary": f"Copy the files the AI writes into {root}", "inside": True,
+                "path": str(root), "rel": ".", "model": lane}
+        conv["mirror_ok"] = (yield from _permit(_perm_mode(), "write_file", info)) == "allow"
+    return bool(conv["mirror_ok"])
+
+
+def _finish_sandbox(conv: dict):
+    """After a code turn, copy what only exists on Arena's sandbox onto this computer: generated images,
+    bash cp/mv/mkdir results, and the npm packages (installed here, not just on Arena's server)."""
+    entries = list((conv.get("sb_ops") or {}).values())
+    if not entries:
+        return
+    done_ids = {r.get("id") for r in conv.get("sandbox", []) if r.get("ok") is True}
+    ids = conv.get("last_arena_ids") or {}
+    for lane in sorted({e["lane"] for e in entries}):
+        ops = [e["op"] for e in entries if e["lane"] == lane and e["op"].get("id") in done_ids]
+        root = _code_root(conv["chat_id"], conv["title"], lane, conv["mode"])
+        if not ops or not (yield from _mirror_allowed(conv, root, lane)):
+            continue
+        man = _sync_load(root)
+        saved, failed = 0, []
+
+        def keep(rel: str, data: bytes) -> bool:
+            target = sandbox_sync.inside(root, rel)
+            if target.is_file() and (rel not in man or _digest(target.read_bytes()) != man[rel]):
+                return False  # the user's own file
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            man[rel] = _digest(data)
+            return True
+
+        for op in ops:
+            if op["kind"] != "touch" or not sandbox_sync.is_binary_path(op.get("path") or ""):
+                continue
+            rel = str(op["path"]).replace("\\", "/").lstrip("./")
+            url = sandbox_sync.preview_url(ids.get(lane), rel)
+            if not url:
+                failed.append(f"{rel} (only files under public/ can be downloaded; ask the AI to save images in public/images/)")
+                continue
+            data, why = None, ""
+            for _ in range(6):
+                try:
+                    r = _media_get(url, timeout=60)
+                    if r.status_code == 200 and r.content:
+                        data = r.content
+                        break
+                    why = f"HTTP {r.status_code}"
+                except (requests.RequestException, ValueError) as e:
+                    why = str(e)[:80]
+                yield from _wait_for(lambda: False, 4)
+            try:
+                if data is None:
+                    failed.append(f"{rel} ({why})")
+                elif keep(rel, data):
+                    saved += 1
+                else:
+                    failed.append(f"{rel} (a different file is already there)")
+            except (OSError, ValueError) as e:
+                failed.append(f"{rel} ({e})")
+        for op in ops:
+            if op["kind"] == "run" and op.get("command"):
+                for res in sandbox_sync.replay_fs(root, op["command"]):
+                    if res.get("ok") and res["op"] in ("cp", "mv"):
+                        target = root / res["path"]
+                        if target.is_file():
+                            man[res["path"]] = _digest(target.read_bytes())
+                            saved += 1
+                    elif res.get("why") and res["op"] in ("cp", "mv"):
+                        failed.append(f"{res['op']} {res['path']} ({res['why']})")
+        _sync_save(root, man)
+        if saved:
+            yield _sse({"type": "notice", "text": f"Saved {saved} more file(s) from Arena's sandbox into {root}"})
+        if failed:
+            yield _sse({"type": "notice", "level": "warn",
+                        "text": "Could not copy: " + "; ".join(failed[:6]) + (" ..." if len(failed) > 6 else "")})
+
+        packages, wants = [], False
+        for op in ops:
+            if op["kind"] == "npm":
+                wants, packages = True, packages + list(op.get("packages") or [])
+            elif op["kind"] == "run":
+                names = sandbox_sync.npm_packages(op.get("command", ""))
+                if names is not None:
+                    wants, packages = True, packages + names
+        if not (root / "package.json").is_file() or not (wants or not (root / "node_modules").is_dir()):
+            continue
+        packages = sorted(set(packages))
+        cmdline = "npm install" + (" " + " ".join(packages) if packages else "")
+        mode = _perm_mode()
+        if mode == "plan":
+            yield _sse({"type": "notice", "text": f"Plan mode: not running `{cmdline}` here. Run it yourself in {root}."})
+            continue
+        if mode in ("acceptEdits", "bypassPermissions"):
+            allow = True
+        else:
+            allow = (yield from _permit(mode, "run_cmd", {
+                "tool": "run_cmd", "command": cmdline, "path": str(root), "rel": ".", "inside": True,
+                "summary": f"Run `{cmdline}` in {root} so the project works on this computer"})) == "allow"
+        if not allow:
+            yield _sse({"type": "notice", "text": f"Not installed. Run `{cmdline}` in {root} when you are ready."})
+            continue
+        yield _sse({"type": "notice", "text": f"Installing packages on this computer: {cmdline} (this can take a minute)"})
+        box: dict = {}
+        worker = threading.Thread(target=lambda: box.update(res=sandbox_sync.run_npm_install(root, packages)), daemon=True)
+        worker.start()
+        yield from _wait_for(lambda: not worker.is_alive(), 900)
+        ok, tail = box.get("res") or (False, "npm install did not finish")
+        if ok:
+            yield _sse({"type": "notice", "text": f"Packages installed in {root}. Run `npm run dev` there to start the site."})
+        else:
+            yield _sse({"type": "notice", "level": "warn", "text": f"npm install failed in {root}: {tail}"})
 
 
 def _local_edits(root: Path):
@@ -856,6 +1013,9 @@ def _line_events(r, conv: dict):
             yield _sse({"type": "error", "code": code, "model": lane, "retry": True,
                         "message": message})
         elif kind == "tool_call" and isinstance(value, dict):
+            # Where in the answer text this call happened, so a reload shows
+            # the narration between tool rows in the same order as live.
+            conv.setdefault("_text_at", {})[lane] = len(out[lane])
             yield from _sandbox_call(lane, value, conv)
         elif kind == "tool_result" and isinstance(value, dict):
             yield from _sandbox_result(lane, value, conv)

@@ -1,16 +1,31 @@
-# Keep dependencies and actions current.
-# Docs: https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
-
+# Keep dependencies and actions current, quietly: one grouped PR per month per
+# ecosystem. Lock files are compiled with uv (see requirements-dev.txt); after
+# merging a requirements.txt bump, re-run the two `uv pip compile` commands.
 version: 2
 updates:
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
-      interval: "weekly"
-    # requirements.txt is the input file; the *.lock files are generated
-    # with pip-compile (see requirements-dev.txt). Dependabot updates both.
+      interval: "monthly"
+    open-pull-requests-limit: 2
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+    groups:
+      python-deps:
+        patterns: ["*"]
+    commit-message:
+      prefix: "deps"
 
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
+    open-pull-requests-limit: 1
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"

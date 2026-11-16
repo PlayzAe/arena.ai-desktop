@@ -42,6 +42,21 @@
     state.workspaceRequest += 1;
   }
 
+  // The Workspace panel follows the folder by itself: a folder being chosen or
+  // changed, and files the AI writes or edits (tool results, saved files), all
+  // schedule one debounced reload of the root and of every expanded folder.
+  let workspaceTreeTimer = null;
+  function scheduleWorkspaceTreeRefresh(delay = 350) {
+    if (workspaceTreeTimer) window.clearTimeout(workspaceTreeTimer);
+    workspaceTreeTimer = window.setTimeout(async () => {
+      workspaceTreeTimer = null;
+      if (!state.workspacePanelOpen || state.serverError) return;
+      await loadWorkspaceTree('.', { force: true });
+      const expanded = [...(state.workspaceExpanded || [])];
+      await Promise.allSettled(expanded.map((path) => loadWorkspaceTree(path, { force: true })));
+    }, delay);
+  }
+
   function syncWorkspacePanelVisibility() {
     const open = Boolean(state.workspacePanelOpen);
     if (els.app) els.app.dataset.workspacePanel = open ? 'open' : 'closed';
@@ -64,7 +79,7 @@
     if (!state.workspacePanelOpen) return;
     renderWorkspaceTreePanel();
     renderConnectorsPanel();
-    if (load) void refreshWorkspacePanel();
+    if (load) void refreshWorkspacePanel({ force: true });
     if (focusConnectors) {
       window.setTimeout(() => {
         els.connectorsPane?.scrollIntoView({ block: 'nearest' });
@@ -631,8 +646,12 @@
     state.arenaConnectorPoll = null;
   }
 
-  async function pollArenaConnectorFlow(slug, name, token) {
-    const deadline = Date.now() + 5 * 60 * 1000;
+  /* Connecting opens Merge's hosted sign-in page in the user's default
+     browser (the embedded Arena window blocks third-party cookies, which
+     breaks Merge's widget with "CSRF verification failed"). The server keeps
+     checking the connector status; this dialog closes by itself on success. */
+  async function pollArenaConnectorFlow(slug, name, token, dialog) {
+    const deadline = Date.now() + 10 * 60 * 1000;
     while (!token.cancelled && Date.now() < deadline) {
       await sleep(state.demo ? 600 : 2500);
       if (token.cancelled) return;
@@ -642,17 +661,54 @@
       } catch {
         continue;
       }
+      if (token.cancelled) return;
       if (Array.isArray(result?.connectors)) applyArenaConnectorsPayload(result);
       if (result?.done) {
-        if (result.connected) toast(`Connector "${name}" is connected to the Arena account.`, 'success');
-        else if (result.outcome === 'exit') toast("The connection window was closed without confirmation.", 'info', name);
-        else if (result.outcome === 'timeout') toast("Timeout expired. Refresh the list to check the status.", 'warning', name);
         void loadArenaConnectors({ silent: true });
         void loadStatus({ quiet: true });
+        if (result.connected) {
+          dialog.showSuccess();
+          toast(`Connector "${name}" is connected to the Arena account.`, 'success');
+          await sleep(1800);
+          dialog.close();
+        } else {
+          dialog.close();
+          toast("Timeout expired. Refresh the list to check the status.", 'warning', name);
+        }
         return;
       }
     }
-    if (!token.cancelled) toast("Connection is not yet complete. Check the status later with the refresh button.", 'warning', name);
+    if (!token.cancelled) {
+      dialog.close();
+      toast("Connection is not yet complete. Check the status later with the refresh button.", 'warning', name);
+    }
+  }
+
+  function mountArenaConnectorDialog(name, { token, authUrl = '' } = {}) {
+    const status = el('p', { class: 'modal-copy', role: 'status', 'aria-live': 'polite',
+      text: "Waiting for you to finish in your browser…" });
+    const content = el('div', {},
+      el('p', { class: 'modal-copy', text: `The ${name} sign-in page was opened in your default browser. Finish connecting there.` }),
+      el('p', { class: 'modal-copy', text: "If the page shows an error or stays blank, turn off your ad blocker or Brave Shields for it (Brave: click the lion icon in the address bar and switch Shields off), then reload the page." }),
+      authUrl ? el('p', { class: 'modal-copy', text: "The browser could not be opened automatically. Copy this link into your browser:" }) : null,
+      authUrl ? el('input', { class: 'input', type: 'text', readonly: true, value: authUrl, 'aria-label': "Sign-in link" }) : null,
+      status
+    );
+    const modal = mountModal({
+      title: `Connect ${name}`,
+      subtitle: "Continue in your browser",
+      size: 'small',
+      content,
+      actions: [{ label: "Cancel", variant: 'quiet' }],
+      onClose: () => { token.cancelled = true; }
+    });
+    return {
+      close: modal.close,
+      showSuccess() {
+        content.replaceChildren(el('p', { class: 'modal-copy', role: 'status', text: "All done, connected successfully" }));
+        modal.footer.replaceChildren();
+      }
+    };
   }
 
   async function connectArenaConnectorFlow(connector) {
@@ -664,23 +720,16 @@
     try {
       const result = await API.connectArenaConnector(slug);
       if (result?.pending) {
-        toast(state.demo
-          ? "Demo: connection is simulated without Arena window and OAuth."
-          : "Complete the connection in the opened Arena window. After confirmation, the window will close automatically.",
-          'info', connector.name || slug);
+        const name = connector.name || slug;
         const token = { slug, cancelled: false };
         state.arenaConnectorPoll = token;
-        await pollArenaConnectorFlow(slug, connector.name || slug, token);
+        const dialog = mountArenaConnectorDialog(name, { token, authUrl: result.opened === false ? String(result.auth_url || '') : '' });
+        await pollArenaConnectorFlow(slug, name, token, dialog);
       } else {
         await loadArenaConnectors({ silent: true });
       }
     } catch (error) {
-      const details = error?.details || {};
-      if (details.code === 'engine_required' && details.fallback_url && !state.desktop) {
-        toast(`${errorMessage(error)} Open arena.ai and connect the connector there — it will appear in this list after refreshing.`, 'warning', connector.name || slug);
-      } else {
-        toast(errorMessage(error), 'error', connector.name || slug);
-      }
+      toast(errorMessage(error), 'error', connector.name || slug);
     } finally {
       state.arenaConnectorBusy.delete(slug);
       refreshConnectorSurfaces();

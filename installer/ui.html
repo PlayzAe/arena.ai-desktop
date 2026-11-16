@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Arena Desktop Setup</title>
+<style>
+  :root {
+    --bg: #121514; --card: #1a1d1c; --tile: #0f1211; --tile-on: #232827; --line: #2a2f2e;
+    --fg: #f4f0eb; --mute: #8b958e; --accent: #d97757; --ok: #34d399; --err: #f87171; --warn: #fbbf24;
+    --ease: cubic-bezier(.23, 1, .32, 1);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); overflow: hidden; user-select: none;
+    font: 13px/1.45 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; }
+  .card { height: 100%; padding: 18px 18px 16px; display: flex; flex-direction: column; gap: 14px; background: var(--card);
+    border: 1px solid var(--line); }
+  header { display: flex; align-items: center; gap: 12px; }
+  .logo { width: 40px; height: 40px; flex: none; }
+  .titles { flex: 1; min-width: 0; }
+  h1 { margin: 0; font-size: 16px; font-weight: 700; letter-spacing: -.01em; }
+  .sub { color: var(--mute); font-size: 11.5px; margin-top: 1px; }
+  .sub b { color: var(--ok); font-weight: 600; }
+  .x { width: 28px; height: 28px; display: grid; place-items: center; border: 0; border-radius: 8px; color: var(--mute);
+    background: transparent; cursor: pointer; transition: background .14s var(--ease), color .14s var(--ease); }
+  .x:hover { background: var(--tile-on); color: var(--fg); }
+  .x:focus-visible, .btn:focus-visible, .switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .x svg { width: 14px; height: 14px; }
+
+  .steps { display: flex; flex-direction: column; gap: 8px; }
+  .step { display: flex; flex-direction: column; align-items: stretch; }
+  .row { position: relative; z-index: 1; display: flex; align-items: center; gap: 12px; padding: 10px; border-radius: 14px;
+    background: var(--tile); transition: background .25s var(--ease); }
+  .step.run .row { background: #161a19; box-shadow: inset 0 0 0 1px rgba(217, 119, 87, .35); }
+  .tile { width: 34px; height: 34px; flex: none; display: grid; place-items: center; border-radius: 10px; background: #171b1a;
+    color: var(--mute); transition: background .25s var(--ease), color .25s var(--ease); }
+  .step.run .tile { background: var(--tile-on); color: var(--accent); }
+  .step.ok .tile { background: var(--tile-on); color: var(--fg); }
+  .tile svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+  .copy { flex: 1; min-width: 0; }
+  .t { font-weight: 600; font-size: 12.5px; }
+  .d { color: var(--mute); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .badge { width: 22px; height: 22px; flex: none; display: grid; place-items: center; border-radius: 50%;
+    background: #222726; transition: background .25s var(--ease), transform .25s var(--ease); }
+  .badge i { width: 6px; height: 6px; border-radius: 50%; background: #4a524f; }
+  .badge svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+  .step.ok .badge { background: var(--fg); color: #101312; animation: pop .35s var(--ease); }
+  .step.ok .badge path { stroke-dasharray: 20; stroke-dashoffset: 20; animation: draw .35s .05s var(--ease) forwards; }
+  .step.fail .badge { background: rgba(248, 113, 113, .18); color: var(--err); animation: pop .35s var(--ease); }
+  .step.skip .badge { background: rgba(251, 191, 36, .16); color: var(--warn); }
+  .spin { width: 11px; height: 11px; border-radius: 50%; border: 2px solid var(--accent); border-top-color: transparent; animation: spin .7s linear infinite; }
+  .drawer { display: grid; grid-template-rows: 0fr; margin: 0 5%; opacity: 0; transition: grid-template-rows .3s var(--ease), opacity .3s var(--ease), margin .3s var(--ease); }
+  .step.fail .drawer { grid-template-rows: 1fr; opacity: 1; margin-top: -12px; }
+  .drawer > div { overflow: hidden; min-height: 0; }
+  .drawer p { margin: 0; padding: 18px 12px 9px; border-radius: 0 0 14px 14px; background: #222726;
+    font: 11px/1.5 Consolas, "Cascadia Mono", monospace; color: #e5e1dc; user-select: text; word-break: break-word; }
+
+  .opts { display: flex; flex-direction: column; gap: 6px; transition: opacity .25s var(--ease), max-height .3s var(--ease); max-height: 120px; }
+  .opts.hide { opacity: 0; max-height: 0; pointer-events: none; overflow: hidden; }
+  .opt { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 12px; border-radius: 12px; background: var(--tile); cursor: pointer; }
+  .opt span { font-size: 12px; }
+  .switch { position: relative; width: 34px; height: 20px; border-radius: 99px; background: #2b302f; flex: none; transition: background .2s var(--ease); border: 0; padding: 0; }
+  .switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: #cfd3d1; transition: transform .2s var(--ease), background .2s var(--ease); }
+  .switch[aria-checked="true"] { background: var(--accent); }
+  .switch[aria-checked="true"]::after { transform: translateX(14px); background: #fff; }
+
+  .where { color: var(--mute); font-size: 11px; font-family: Consolas, "Cascadia Mono", monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .spacer { flex: 1; }
+  .btn { width: 100%; padding: 11px; border: 0; border-radius: 14px; font: 700 12.5px "Segoe UI", sans-serif; cursor: pointer;
+    background: var(--fg); color: #121514; transition: transform .08s var(--ease), background .14s var(--ease), filter .14s var(--ease); }
+  .btn:hover { filter: brightness(.93); }
+  .btn:active { transform: scale(.98); }
+  .btn.busy { background: #262b2a; color: #c8ccca; cursor: default; display: flex; justify-content: center; align-items: center; gap: 9px; }
+  .btn.busy .spin { width: 13px; height: 13px; }
+  .btn.danger { background: var(--err); color: #2b0a0a; }
+  .btn.ghost { background: transparent; color: var(--mute); font-weight: 600; padding: 7px; }
+  .btn.ghost:hover { color: var(--fg); filter: none; }
+  .actions { display: flex; flex-direction: column; gap: 4px; }
+  .banner { padding: 10px 12px; border-radius: 12px; background: rgba(52, 211, 153, .1); color: var(--ok); font-size: 12px; display: none; }
+  .banner.show { display: block; animation: pop .35s var(--ease); }
+  .banner.bad { background: rgba(248, 113, 113, .1); color: var(--err); }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes pop { 0% { transform: scale(.4); } 70% { transform: scale(1.12); } 100% { transform: scale(1); } }
+  @keyframes draw { to { stroke-dashoffset: 0; } }
+  @media (prefers-reduced-motion: reduce) { * { animation-duration: .001s !important; transition-duration: .001s !important; } }
+</style>
+</head>
+<body>
+<main class="card" id="card">
+  <header>
+    <svg class="logo" viewBox="0 0 512 512" aria-hidden="true"><rect width="512" height="512" rx="96" fill="#252523"/>
+      <g transform="translate(256,256)" fill="none" stroke="#F4F0EB" stroke-width="16" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="-120" y1="-100" x2="120" y2="-100"/><line x1="-90" y1="-100" x2="-90" y2="100"/><line x1="0" y1="-100" x2="0" y2="100"/>
+        <line x1="90" y1="-100" x2="90" y2="100"/><line x1="-120" y1="100" x2="120" y2="100"/><polyline points="-120,-100 0,-160 120,-100"/></g></svg>
+    <div class="titles"><h1 id="title">Arena Desktop</h1><div class="sub" id="sub"></div></div>
+    <button class="x" id="closeBtn" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+  </header>
+
+  <section class="steps" id="steps" aria-live="polite"></section>
+
+  <section class="opts" id="opts"></section>
+
+  <div class="banner" id="banner"></div>
+  <div class="spacer"></div>
+  <div class="where" id="where"></div>
+  <div class="actions"><button class="btn" id="go">Install</button><button class="btn ghost" id="later" style="display:none">Close</button></div>
+</main>
+
+<script>
+const ICONS = {
+  close: '<path d="M12 3v8"/><path d="M6.3 6.6a8 8 0 1 0 11.4 0"/>',
+  copy: '<rect x="8" y="8" width="12" height="12" rx="2.5"/><path d="M16 8V6.5A2.5 2.5 0 0 0 13.5 4h-7A2.5 2.5 0 0 0 4 6.5v7A2.5 2.5 0 0 0 6.5 16H8"/>',
+  link: '<path d="M7 17 17 7"/><path d="M8 7h9v9"/>',
+  shield: '<path d="M12 3 5 6v5c0 4.6 3 8.3 7 10 4-1.7 7-5.4 7-10V6z"/><path d="m9 12 2.2 2.2L15.5 10"/>',
+  trash: '<path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 12.5A1.5 1.5 0 0 0 8.5 21h7a1.5 1.5 0 0 0 1.5-1.5L18 7"/><path d="M9 7V4.5h6V7"/>',
+  user: '<circle cx="12" cy="8" r="3.6"/><path d="M5 20c.8-3.6 3.6-5.4 7-5.4s6.2 1.8 7 5.4"/>'
+};
+const CHECK = '<svg viewBox="0 0 16 16"><path d="M3 8.5 6.5 12 13 4.5"/></svg>';
+const CROSS = '<svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></svg>';
+const ARROW = '<svg viewBox="0 0 16 16"><path d="M3 8h10M9 4l4 4-4 4"/></svg>';
+let state = null, started = false;
+const $ = (id) => document.getElementById(id);
+const opts = {};
+
+function build(steps) {
+  $('steps').innerHTML = steps.map((s, i) => `
+    <div class="step" id="s${i}">
+      <div class="row">
+        <div class="tile"><svg viewBox="0 0 24 24">${ICONS[s.icon]}</svg></div>
+        <div class="copy"><div class="t">${s.title}</div><div class="d" id="d${i}">${s.sub}</div></div>
+        <div class="badge" id="b${i}"><i></i></div>
+      </div>
+      <div class="drawer"><div><p id="i${i}"></p></div></div>
+    </div>`).join('');
+}
+
+function buildOpts(list) {
+  $('opts').innerHTML = list.map((o) => `
+    <div class="opt" data-k="${o.key}"><span>${o.label}</span>
+      <button class="switch" role="switch" aria-checked="${o.on}" aria-label="${o.label}"></button></div>`).join('');
+  list.forEach((o) => { opts[o.key] = o.on; });
+  $('opts').querySelectorAll('.opt').forEach((row) => {
+    const sw = row.querySelector('.switch');
+    const flip = () => { const k = row.dataset.k; opts[k] = !opts[k]; sw.setAttribute('aria-checked', String(opts[k])); };
+    row.addEventListener('click', flip);
+    sw.addEventListener('click', (e) => { e.stopPropagation(); flip(); });
+  });
+}
+
+window.onStep = (i, status, info) => {
+  const el = $('s' + i); if (!el) return;
+  el.classList.remove('run', 'ok', 'fail', 'skip');
+  const badge = $('b' + i);
+  if (status === 'run') { el.classList.add('run'); badge.innerHTML = '<div class="spin"></div>'; }
+  else if (status === 'ok') { el.classList.add('ok'); badge.innerHTML = CHECK; }
+  else if (status === 'fail') { el.classList.add('fail'); badge.innerHTML = CROSS; $('i' + i).textContent = info || 'Something went wrong.'; }
+  else if (status === 'skip') { el.classList.add('skip'); badge.innerHTML = ARROW; }
+  if (info && status !== 'fail') $('d' + i).textContent = info;
+};
+
+window.onDone = (ok, message) => {
+  const b = $('banner'); b.textContent = message; b.className = 'banner show' + (ok ? '' : ' bad');
+  const go = $('go');
+  go.className = 'btn';
+  if (ok) {
+    if (state.mode === 'install') { go.textContent = opts.launch ? 'Open Arena Desktop' : 'Done'; go.onclick = () => pywebview.api.finish(!!opts.launch); }
+    else { go.textContent = 'Done'; go.onclick = () => pywebview.api.finish(false); }
+  } else {
+    go.textContent = 'Close'; go.onclick = () => pywebview.api.finish(false);
+  }
+};
+
+async function init() {
+  state = await pywebview.api.get_state();
+  document.title = state.mode === 'install' ? 'Arena Desktop Setup' : 'Uninstall Arena Desktop';
+  $('title').textContent = state.mode === 'install' ? 'Arena Desktop' : 'Remove Arena Desktop?';
+  $('sub').innerHTML = state.mode === 'install'
+    ? `Version ${state.version}${state.existing ? ' &middot; <b>update</b>' : ''}`
+    : 'Project folders are never touched.';
+  $('where').textContent = state.path;
+  build(state.steps); buildOpts(state.options);
+  const go = $('go');
+  go.textContent = state.mode === 'install' ? (state.existing ? 'Update' : 'Install') : 'Uninstall';
+  if (state.mode !== 'install') go.classList.add('danger');
+  go.onclick = async () => {
+    if (started) return; started = true;
+    $('opts').classList.add('hide');
+    go.className = 'btn busy'; go.innerHTML = '<div class="spin"></div><span>' + (state.mode === 'install' ? 'Installing…' : 'Removing…') + '</span>';
+    await pywebview.api.start(opts);
+  };
+  $('closeBtn').onclick = () => pywebview.api.finish(false);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !started) pywebview.api.finish(false); });
+  go.focus();
+}
+window.addEventListener('pywebviewready', init);
+</script>
+</body>
+</html>

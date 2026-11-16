@@ -445,46 +445,39 @@
 
   function renderDiffCard(activity) {
     const raw = activity.raw || {};
-    const fileName = (raw.path || activity.path || '').split('/').pop() || 'file';
     const adds = raw.add || 0;
     const dels = raw.del || 0;
     const verb = raw.verb || 'Edited';
-    const diffText = raw.diff || '';
-    const hasError = !!raw.error;
-    const head = el('div', { class: 'diff-card-head' },
-      el('span', { class: 'diff-card-icon' }, iconEl('file-code')),
-      el('span', { class: 'diff-card-verb', text: verb }),
-      el('span', { class: 'diff-card-file', text: fileName }),
-      el('span', { class: 'diff-card-stats' },
-        adds ? el('span', { class: 'diff-stat-add', text: `+${adds}` }) : null,
-        dels ? el('span', { class: 'diff-stat-del', text: `-${dels}` }) : null
-      )
-    );
-    if (hasError) {
-      head.appendChild(el('span', { class: 'diff-card-error', text: raw.error }));
+    const path = raw.path || activity.path || '';
+    const hasError = Boolean(raw.error);
+    const pending = Boolean(raw.pending);
+    const name = verb === 'Deleted' ? 'Delete' : verb === 'Created' || verb === 'Writing' ? 'Write' : 'Update';
+    const stateCls = hasError ? 'is-err' : (pending || !activityStatus(activity.status).cls) ? 'is-run' : 'is-ok';
+    const row = el('div', { class: `tool-row ${stateCls}`, 'data-activity-id': activity.id },
+      el('div', { class: 'tool-head', title: path },
+        el('span', { class: 'tool-dot', 'aria-hidden': 'true' }),
+        el('span', { class: 'tool-name', text: name }),
+        el('span', { class: 'tool-arg' }, el('span', { class: 'tool-paren', text: '(' }),
+          el('span', { class: 'tool-arg-text', text: path }), el('span', { class: 'tool-paren', text: ')' }))));
+    let summary;
+    if (hasError) summary = String(raw.error);
+    else if (verb === 'Deleted') summary = 'Deleted';
+    else if (pending) summary = verb === 'Writing' ? 'Writing…' : 'Editing…';
+    else if (verb === 'Created') summary = `Wrote ${plural(adds, 'line')}`;
+    else summary = `Added ${plural(adds, 'line')}, removed ${plural(dels, 'line')}`;
+    const content = el('div', { class: 'tool-content' }, el('div', { class: `tool-summary${hasError ? ' is-err' : ''}`, text: summary }));
+    const expanded = expandedActivities.has(activity.id);
+    const diffBox = raw.diff && !pending ? renderDiffLines(raw.diff, expanded ? 400 : 8) : null;
+    if (diffBox) {
+      content.appendChild(diffBox);
+      if (!expanded && String(raw.diff).split('\n').length > 12) {
+        content.appendChild(el('button', { class: 'tool-more tool-toggle', type: 'button', 'data-tool-toggle': activity.id, text: '… (click to expand)' }));
+      } else if (expanded) {
+        content.appendChild(el('button', { class: 'tool-more tool-toggle', type: 'button', 'data-tool-toggle': activity.id, text: 'Collapse' }));
+      }
     }
-    const card = el('div', { class: `diff-card${hasError ? ' diff-card-err' : ''}` });
-    if (diffText) {
-      const details = el('details', { class: 'diff-card-body' });
-      const summary = el('summary');
-      summary.appendChild(head);
-      details.appendChild(summary);
-      const pre = el('pre', { class: 'diff-block' });
-      diffText.split('\n').forEach((line) => {
-        const span = document.createElement('span');
-        span.textContent = line;
-        if (line.startsWith('+') && !line.startsWith('+++')) span.className = 'diff-add';
-        else if (line.startsWith('-') && !line.startsWith('---')) span.className = 'diff-del';
-        else if (line.startsWith('@@')) span.className = 'diff-hunk';
-        pre.appendChild(span);
-        pre.appendChild(document.createTextNode('\n'));
-      });
-      details.appendChild(el('div', { class: 'diff-card-content' }, pre));
-      card.appendChild(details);
-    } else {
-      card.appendChild(head);
-    }
-    return card;
+    row.appendChild(el('div', { class: 'tool-body' }, el('span', { class: 'tool-elbow', 'aria-hidden': 'true', text: '⎿' }), content));
+    return row;
   }
 
   const _livePreviewFrames = new Map();
@@ -639,6 +632,14 @@
     const obj = parseJsonObject(out);
     if (obj) {
       const pickText = (value) => (typeof value === 'string' ? value : '');
+      if (!obj.error && obj.file && typeof obj.file.content === 'string') {
+        out = obj.file.content;   // Read: show the file, not the JSON wrapper
+        return { summary: `Read ${plural(lineCount(out), 'line')}`, body: out, folded: true };
+      }
+      if (!obj.error && Array.isArray(obj.files)) {
+        const names = obj.files.map((f) => (typeof f === 'string' ? f : (f && (f.path || f.name)) || '')).filter(Boolean);
+        return { summary: `Listed ${plural(names.length, 'file')}`, body: names.join('\n'), folded: true };
+      }
       const stdout = pickText(obj.stdout ?? obj.output ?? obj.result ?? obj.text ?? obj.content);
       const stderr = pickText(obj.stderr);
       const code = obj.exitCode ?? obj.exit_code ?? obj.returncode ?? obj.code;
@@ -646,7 +647,8 @@
         out = [stdout, stderr].filter((part) => part.trim()).join('\n');
         if (label === 'Bash' && Number.isInteger(code)) out = `exit code ${code}\n${out}`;
       } else if (/^(Generate|Edit) (image|video)$/.test(label)) {
-        return { summary: obj.error ? String(obj.error) : 'Done', body: '' };
+        const what = label.toLowerCase().includes('video') ? 'video' : 'image';
+        return { summary: obj.error ? String(obj.error) : (typeof obj.message === 'string' && obj.message ? obj.message : `Generated ${what}`), body: '' };
       } else if (!obj.error && (obj.status === 'success' || obj.success === true || obj.ok === true)
         && Object.keys(obj).every((k) => ['status', 'success', 'ok', 'hash', 'path', 'bytes', 'size', 'message'].includes(k))) {
         // Arena Agent's file tools answer {"status":"success","hash":...}: say it plainly.
@@ -666,8 +668,15 @@
       }
       body = body.replace(/\n?\[Process exited with code -?\d+\]\s*$/, '')
         .replace(/^\(command finished with no output\)$/, '');
-      const summary = !body.trim() ? (code === null || code === 0 ? '(No output)' : `Exit code ${code}`) : '';
-      return { summary, body, code };
+      let summary = !body.trim() ? (code === null || code === 0 ? '(No output)' : `Exit code ${code}`) : '';
+      let folded = false;
+      if (body.trim() && (code === null || code === 0)) {
+        // One line for the result people look for: "built in 1.4s", "added 4 packages ... in 3s".
+        const hit = body.split('\n').map((l) => l.replace(/\x1b\[[0-9;]*m/g, '').trim())
+          .reverse().find((l) => /\bbuilt in [\d.]+m?s\b|^added \d+ packages|\bDone in [\d.]+m?s\b|^\d+ passed|\btests? passed\b/i.test(l));
+        if (hit) { summary = hit.replace(/^[✓✔]\s*/, ''); folded = true; }
+      }
+      return { summary, body, code, folded };
     }
     if (label === 'Read' && !/^(Error|FileNotFoundError|ValueError)/.test(out)) {
       const ranged = out.match(/^\[lines (\d+)-(\d+) of (\d+)\]\n?/);
@@ -734,7 +743,7 @@
       content.appendChild(el('div', { class: 'tool-summary is-wait', text: 'Waiting for your approval…' }));
     } else if (!out && !diff) {
       if (running) content.appendChild(el('div', { class: 'tool-summary is-muted' }, el('span', { class: 'tool-spinner', 'aria-hidden': 'true' }), el('span', { text: label === 'Bash' ? 'Running…' : 'Working…' })));
-      else if (stateCls === 'is-err') content.appendChild(el('div', { class: 'tool-summary is-err', text: String(raw.status && raw.status !== 'error' ? raw.status : (activity.status && activity.status !== 'error' ? activity.status : 'Failed')) }));
+      else if (stateCls === 'is-err') content.appendChild(el('div', { class: 'tool-summary is-err', text: String(raw.status && raw.status !== 'error' ? raw.status : activity.status || 'Failed') }));
       else return finishRow(row, activity);
     }
 
@@ -813,10 +822,10 @@
     return (lane.permissions || []).some((item) => !item.status || item.status === 'pending');
   }
 
-  function renderActivities(lane) {
-    if (!Array.isArray(lane.activities) || !lane.activities.length) return null;
+  function renderActivities(lane, list = lane.activities, tail = null) {
+    if (!Array.isArray(list) || !list.length) return null;
     const waitingId = lane.streaming && laneAwaitsApproval(lane) ? currentToolActivity(lane)?.id : null;
-    const cards = lane.activities.map((activity) => {
+    const cards = list.map((activity) => {
       const raw = activity.raw || {};
       if (activity.kind === 'sandbox' && (raw.verb === 'Edited' || raw.verb === 'Created' || raw.verb === 'Deleted') && raw.path) {
         const diffCard = renderDiffCard(activity);
@@ -834,7 +843,30 @@
       }
       return renderToolRow(activity, lane.streaming, activity.id === waitingId);
     });
-    return el('div', { class: 'tool-list' }, cards);
+    return el('div', { class: 'tool-list' }, cards, tail);
+  }
+
+  // Claude Code's status line while a step runs:  ✻ Reading the workspace…
+  const RUNNING_VERBS = { Read: 'Reading the workspace', List: 'Reading the workspace', Search: 'Searching the workspace',
+    Bash: 'Running a command', Write: 'Writing files', Update: 'Editing files', 'Generate image': 'Generating an image' };
+  function renderRunningLine(lane) {
+    if (!lane.streaming) return null;
+    const list = lane.activities || [];
+    const last = list[list.length - 1];
+    const running = last && !activityStatus(last.status).cls;
+    const verb = running ? (RUNNING_VERBS[toolLabel(last)] || 'Working') : 'Thinking';
+    return el('div', { class: 'term-running', role: 'status' },
+      el('span', { class: 'term-star', 'aria-hidden': 'true', text: '✻' }), el('span', { text: `${verb}…` }));
+  }
+
+  function renderTermHead(turn) {
+    const mode = turn.modality === 'webdev' || turn.modality === 'code' || state.modality === 'webdev' ? 'code mode' : 'agent mode';
+    const prompt = String(turn.user?.content || turn.user?.text || '').replace(/\s+/g, ' ').trim();
+    return el('div', { class: 'term-head' },
+      el('div', { class: 'term-title' },
+        el('span', { class: 'term-brand', text: 'arena.ai-desktop' }),
+        el('span', { class: 'term-meta', text: `${state.appVersion ? ` v${state.appVersion}` : ''} · ${mode}` })),
+      prompt ? el('div', { class: 'term-prompt', title: prompt }, el('span', { class: 'term-caret', 'aria-hidden': 'true', text: '>' }), el('span', { text: prompt })) : null);
   }
 
   function renderSitePreviewCard(artifact) {
@@ -1094,12 +1126,48 @@
     if (lane.streaming && visibleText && !showTypewriter) markdown.appendChild(el('span', { class: 'stream-cursor', 'aria-hidden': 'true' }));
     // Claude order: thinking, then the work (tool rows, approvals), then the
     // answer itself at the bottom, then what it produced (media, sources, files).
-    const activities = renderActivities(lane);
-    if (activities) card.appendChild(activities);
+    const acts = Array.isArray(lane.activities) ? lane.activities : [];
+    const termMode = acts.length > 0;
+    if (termMode) card.appendChild(renderTermHead(turn));
+    // Arena's own order: narration sits between the tool rows it was written between.
+    const rawText = lane.text || '';
+    const interleave = termMode && rawText && visibleText === rawText
+      && acts.some((a) => a.kind === 'sandbox' && Number.isFinite(a.raw?.at));
+    let tailNode = null;
+    if (interleave) {
+      let cursor = 0;
+      let group = [];
+      const flush = () => { if (group.length) { card.appendChild(renderActivities(lane, group)); group = []; } };
+      acts.forEach((a) => {
+        const at = Number.isFinite(a.raw?.at) ? Math.min(Math.max(a.raw.at, cursor), rawText.length) : cursor;
+        if (at > cursor) {
+          flush();
+          const piece = rawText.slice(cursor, at);
+          if (piece.trim()) card.appendChild(el('div', { class: 'term-say' }, el('span', { class: 'term-say-dot', 'aria-hidden': 'true', text: '●' }), el('div', { class: 'markdown' }, renderMarkdown(piece.trim()))));
+          cursor = at;
+        }
+        group.push(a);
+      });
+      flush();
+      const rest = rawText.slice(cursor);
+      markdown.textContent = '';
+      if (showTypewriter) markdown.appendChild(_laneTypewriters.get(lane));
+      else if (rest.trim()) markdown.appendChild(renderMarkdown(rest.trim()));
+      if (lane.streaming && rest.trim() && !showTypewriter) markdown.appendChild(el('span', { class: 'stream-cursor', 'aria-hidden': 'true' }));
+      const running = renderRunningLine(lane);
+      if (running) card.appendChild(running);
+    } else {
+      const activities = renderActivities(lane, acts, renderRunningLine(lane));
+      if (activities) card.appendChild(activities);
+    }
     if (Array.isArray(lane.permissions)) {
       lane.permissions.forEach((permission) => card.appendChild(renderPermissionCard(permission)));
     }
-    card.appendChild(markdown);
+    if (termMode && markdown.childNodes.length) {
+      card.appendChild(el('div', { class: 'term-say is-answer' }, el('span', { class: 'term-say-dot', 'aria-hidden': 'true', text: '●' }), markdown));
+    } else {
+      card.appendChild(markdown);
+    }
     const media = renderMedia(lane);
     if (media) card.appendChild(media);
     const mediaChoices = renderMediaChoices(lane);

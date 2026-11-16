@@ -9,57 +9,45 @@
 #
 # arena.ai exposes its Agent Mode connectors under /api/connectors: a live
 # catalog ({slug, displayName, description, logoUrl, authStatus}), a status
-# endpoint, POST /:slug/link-token (Merge/AgentHandler link widget token),
-# DELETE /:slug and POST /sync.  Fetching the catalog live means connectors
-# Arena adds later appear here automatically.  Connecting runs the same
-# AgentHandlerLink widget arena.ai's own page uses, inside the separate Arena
-# window, so the authorization lands on the signed-in Arena account.  These
-# account connectors serve Arena's native Agent on the website; the local
-# Agent below uses local MCP servers instead.
+# endpoint, POST /:slug/link-token ({linkToken, authUrl}), DELETE /:slug and
+# POST /sync.  Fetching the catalog live means connectors Arena adds later
+# appear here automatically.
+#
+# Connecting opens `authUrl` (Merge's hosted magic link,
+# https://ah-api.merge.dev/magic-link/<token>/) in the user's DEFAULT BROWSER.
+# Running Merge's link widget inside the embedded Arena window fails with
+# "Authentication error: CSRF verification failed" because the widget is a
+# third-party iframe and the embedded window blocks third-party cookies.  The
+# hosted page is a normal top-level page, so it works wherever cookies do (ad
+# blockers / Brave Shields can still break it: the UI tells the user to turn
+# them off).  The link token is bound to the signed-in Arena account, so the
+# authorization lands on it.  Completion is detected server-side by polling
+# the connector status plus POST /sync (see api_arena_connector_connect_poll).
+# These account connectors serve Arena's native Agent on the website; the
+# local Agent below uses local MCP servers instead.
 
 _CONNECTOR_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _connector_link_pending: Optional[dict] = None
 
-_LINK_WIDGET_JS = r"""
-(function () {
-  var TOKEN = __TOKEN__;
-  window.__apLink = { state: 'loading', error: null };
-  function fail(e) { window.__apLink = { state: 'error', error: String((e && e.message) || e) }; }
-  function start() {
-    try {
-      var config = {
-        linkToken: TOKEN,
-        onSuccess: function () { window.__apLink = { state: 'success', error: null }; },
-        onExit: function () {
-          if (window.__apLink.state !== 'success') window.__apLink = { state: 'exit', error: null };
-        },
-        onValidationError: function (e) {
-          window.__apLink = { state: 'error', error: String((e && (e.detail || e.message)) || 'validation error') };
-        }
-      };
-      window.AgentHandlerLink.initialize(Object.assign({}, config, { onReady: function () {
-        try {
-          window.AgentHandlerLink.openLink(config);
-          if (window.__apLink.state === 'loading') window.__apLink = { state: 'open', error: null };
-        } catch (e) { fail(e); }
-      }}));
-    } catch (e) { fail(e); }
-  }
-  if (window.AgentHandlerLink) { start(); return 'started'; }
-  var s = document.createElement('script');
-  s.src = 'https://ah-cdn.merge.dev/initialize.js';
-  // No credentials to the CDN. SRI is deliberately not pinned here: Merge
-  // rotates this unversioned file (max-age=120) and the widget then loads
-  // more of itself from the same vendor, so a hash pin only breaks the
-  // OAuth flow on every deploy without containing a compromised vendor.
-  // See KNOWN_ISSUES.md ("CDN scripts") for the analysis and the durable fix.
-  s.crossOrigin = 'anonymous';
-  s.onload = start;
-  s.onerror = function () { fail('widget script failed to load'); };
-  document.body.appendChild(s);
-  return 'started';
-})()
-"""
+_MERGE_LINK_HOST_SUFFIX = ".merge.dev"
+_CONNECTOR_SYNC_EVERY = 8  # seconds between /sync calls while waiting for the browser flow
+_CONNECTOR_LINK_TTL = 600
+
+
+def _merge_link_url(value) -> Optional[str]:
+    """The hosted link URL, only if it is https on a merge.dev host."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = urllib.parse.urlparse(value)
+    except ValueError:
+        return None
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or parsed.username or parsed.password:
+        return None
+    if not (host == "merge.dev" or host.endswith(_MERGE_LINK_HOST_SUFFIX)):
+        return None
+    return value
 
 
 def _valid_connector_slug(slug) -> bool:
@@ -125,18 +113,6 @@ def _fetch_arena_connectors():
     return out, None, 200
 
 
-def _connector_link_state() -> dict:
-    raw = ENGINE.run_script("window.__apLink ? JSON.stringify(window.__apLink) : null")
-    if isinstance(raw, str) and raw:
-        try:
-            data = json.loads(raw)
-        except ValueError:
-            return {}
-        if isinstance(data, dict):
-            return data
-    return {}
-
-
 @app.route("/api/arena-connectors")
 def api_arena_connectors():
     client = get_client()
@@ -151,44 +127,34 @@ def api_arena_connectors():
 
 @app.route("/api/arena-connectors/<slug>/connect", methods=["POST"])
 def api_arena_connector_connect(slug):
+    """Open Merge's hosted authorization page in the user's default browser."""
     global _connector_link_pending
     if not _valid_connector_slug(slug):
         return jsonify({"ok": False, "error": "Invalid connector slug"}), 400
     client = get_client()
     if not _signed_in_somewhere(client):
         return jsonify({"ok": False, "error": "Not signed in", "code": "auth"}), 401
-    if not _engine_on():
-        return jsonify({"ok": False, "code": "engine_required",
-                        "error": "Connecting an Arena connector needs the desktop app: "
-                                 "the authorization widget opens inside the Arena window.",
-                        "fallback_url": contracts.ORIGIN + "/agent"}), 400
-    if (_connector_link_pending and _connector_link_pending.get("slug") == slug
-            and time.time() - _connector_link_pending.get("started", 0) < 600
-            and _connector_link_state().get("state") in ("loading", "ready", "open")):
-        ENGINE.show()
-        return jsonify({"ok": True, "pending": True, "slug": slug})
-    if not ENGINE.wait_ready(30):
-        ENGINE.show()
-        hint = (f"arena.ai is waiting for a {ENGINE.challenge} check" if ENGINE.challenge
-                else "arena.ai window is still loading")
-        return jsonify({"ok": False, "code": "engine_not_ready",
-                        "error": f"{hint}. Finish it in the Arena window, then try again."}), 503
     quoted = urllib.parse.quote(slug, safe="")
     data, error, status = _arena_get_json(
         contracts.PATHS["connector_link_token"].format(slug=quoted), timeout=35, method="POST")
     if error:
         code = 503 if status == 0 else (status or 502)
         return jsonify({"ok": False, "error": error, "code": "arena_connectors"}), code
-    token = data.get("linkToken") if isinstance(data, dict) else None
-    if not isinstance(token, str) or not token:
-        return jsonify({"ok": False, "error": "arena.ai did not return a link token for this connector."}), 502
-    ENGINE.show()
-    result = ENGINE.run_script(_LINK_WIDGET_JS.replace("__TOKEN__", json.dumps(token)))
-    if result not in (None, "started"):
-        return jsonify({"ok": False, "code": "engine_script",
-                        "error": "Could not open the authorization widget in the Arena window."}), 502
-    _connector_link_pending = {"slug": slug, "started": time.time(), "synced": False}
-    return jsonify({"ok": True, "pending": True, "slug": slug})
+    auth_url = _merge_link_url(data.get("authUrl")) if isinstance(data, dict) else None
+    if not auth_url:
+        return jsonify({"ok": False, "code": "no_auth_url",
+                        "error": "arena.ai did not return a sign-in link for this connector."}), 502
+    try:
+        opened = bool(webbrowser.open(auth_url))
+    except Exception:
+        LOG.exception("could not open the default browser for connector %s", slug)
+        opened = False
+    _connector_link_pending = {"slug": slug, "started": time.time(), "synced": False, "last_sync": time.time()}
+    payload = {"ok": True, "pending": True, "slug": slug, "browser": True, "opened": opened}
+    if not opened:
+        # No default browser could be launched: let the UI show the link to copy.
+        payload["auth_url"] = auth_url
+    return jsonify(payload)
 
 
 @app.route("/api/arena-connectors/<slug>/connect/poll")
@@ -200,12 +166,12 @@ def api_arena_connector_connect_poll(slug):
     if not _signed_in_somewhere(client):
         return jsonify({"ok": False, "error": "Not signed in", "code": "auth"}), 401
     pending = _connector_link_pending if _connector_link_pending and _connector_link_pending.get("slug") == slug else None
-    state = _connector_link_state().get("state") if _engine_on() else None
-    started = pending.get("started", 0) if pending else 0
-    # arena.ai's own flow syncs accounts once the widget reports success.  A
-    # delayed one-off sync also covers the state being unreadable (for example
-    # the Arena page navigated while the widget was open).
-    if pending and not pending.get("synced") and (state == "success" or (state is None and time.time() - started > 30)):
+    now = time.time()
+    # arena.ai's own flow syncs accounts once the link reports success.  The
+    # browser flow has no channel back to us, so ask for a sync periodically
+    # until the connector shows as connected.
+    if pending and now - pending.get("last_sync", 0) >= _CONNECTOR_SYNC_EVERY:
+        pending["last_sync"] = now
         _arena_get_json(contracts.PATHS["connectors_sync"], timeout=35, method="POST")
         pending["synced"] = True
     connectors, error, _status = _fetch_arena_connectors()
@@ -215,23 +181,16 @@ def api_arena_connector_connect_poll(slug):
     def finish(payload):
         global _connector_link_pending
         _connector_link_pending = None
-        if _engine_on():
-            ENGINE.hide()
         return jsonify(payload)
 
     if connected:
         return finish({"ok": True, "done": True, "connected": True, "slug": slug,
                        "connectors": connectors or []})
-    if state == "error":
-        detail = _connector_link_state().get("error") or "authorization widget failed"
-        return finish({"ok": False, "done": True, "connected": False, "outcome": "error",
-                       "error": f"Arena connector authorization failed: {detail}"})
-    if state == "exit" or not pending or time.time() - started > 600:
-        outcome = "exit" if state == "exit" else "timeout"
-        return finish({"ok": True, "done": True, "connected": False, "outcome": outcome, "slug": slug})
+    if not pending or now - pending.get("started", 0) > _CONNECTOR_LINK_TTL:
+        return finish({"ok": True, "done": True, "connected": False, "outcome": "timeout", "slug": slug})
     if error:
-        return jsonify({"ok": True, "done": False, "connected": False, "state": state, "warning": error})
-    return jsonify({"ok": True, "done": False, "connected": False, "state": state, "slug": slug})
+        return jsonify({"ok": True, "done": False, "connected": False, "warning": error})
+    return jsonify({"ok": True, "done": False, "connected": False, "slug": slug})
 
 
 @app.route("/api/arena-connectors/<slug>/disconnect", methods=["POST"])

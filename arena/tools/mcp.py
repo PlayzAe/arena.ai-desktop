@@ -242,6 +242,130 @@ class McpStdioClient:
                     pass
 
 
+class _HttpAlive:
+    """Stands in for a process so connector code can ask poll() whether the server is still usable."""
+
+    def __init__(self, owner: "McpHttpClient"):
+        self._owner = owner
+
+    def poll(self):
+        return None if self._owner._running else 0
+
+
+class McpHttpClient(McpStdioClient):
+    """MCP over HTTP: JSON-RPC POSTs to one URL (streamable HTTP). Replies may be JSON or an SSE stream."""
+
+    def __init__(self, url: str, headers: Optional[Dict[str, str]] = None):
+        super().__init__([])
+        if not str(url).lower().startswith(("http://", "https://")):
+            raise ValueError("MCP url must start with http:// or https://")
+        self.url = str(url)
+        self.headers = {str(k): str(v) for k, v in (headers or {}).items()}
+        self.session_id: Optional[str] = None
+        self._http = None
+
+    def start(self, timeout: float = 30.0) -> bool:
+        import requests
+
+        self.last_error = None
+        self._http = requests.Session()
+        self._running = True
+        self.process = _HttpAlive(self)
+        try:
+            init_res = self.send_request("initialize", {
+                "protocolVersion": "2024-11-05", "capabilities": {},
+                "clientInfo": {"name": "arena-personal", "version": "1.0.0"}}, timeout=timeout)
+            if not init_res or "error" in init_res:
+                raise RuntimeError(f"MCP initialize failed: {(init_res or {}).get('error') or 'no answer from ' + self.url}")
+            self.server_info = init_res.get("serverInfo") if isinstance(init_res.get("serverInfo"), dict) else {}
+            self.send_notification("notifications/initialized", {})
+            tools: List[Dict[str, Any]] = []
+            cursor = None
+            for _page in range(20):
+                res = self.send_request("tools/list", {"cursor": cursor} if cursor else {}, timeout=timeout)
+                if not res or "error" in res:
+                    raise RuntimeError(f"MCP tools/list failed: {(res or {}).get('error') or 'no answer'}")
+                tools.extend(res.get("tools") or [])
+                cursor = res.get("nextCursor")
+                if not cursor:
+                    break
+            self.tools = [t for t in tools if isinstance(t, dict) and t.get("name")]
+            return True
+        except Exception as e:  # noqa: BLE001 - shown in the connector row
+            self.last_error = f"{type(e).__name__}: {e}"
+            self.stop()
+            return False
+
+    def _post(self, payload: Dict[str, Any], timeout: float):
+        headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream", **self.headers}
+        if self.session_id:
+            headers["Mcp-Session-Id"] = self.session_id
+        resp = self._http.post(self.url, data=json.dumps(payload), headers=headers, timeout=timeout, stream=True)
+        sid = resp.headers.get("Mcp-Session-Id")
+        if sid:
+            self.session_id = sid
+        return resp
+
+    def send_request(self, method: str, params: Dict[str, Any], timeout: float = 15.0) -> Optional[Dict[str, Any]]:
+        with self._io_lock:
+            with self._lock:
+                self._req_id += 1
+                req_id = self._req_id
+            try:
+                resp = self._post({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params}, timeout)
+            except Exception as e:  # noqa: BLE001
+                self.last_error = f"{type(e).__name__}: {e}"
+                return None
+            try:
+                if resp.status_code >= 400:
+                    self.last_error = f"HTTP {resp.status_code} from {self.url}"
+                    return None
+                message = self._read_message(resp, req_id)
+            finally:
+                resp.close()
+            if not message:
+                return None
+            if "result" in message:
+                return message["result"]
+            if "error" in message:
+                return {"error": message["error"]}
+            return message
+
+    @staticmethod
+    def _read_message(resp, req_id: int) -> Optional[Dict[str, Any]]:
+        ctype = (resp.headers.get("Content-Type") or "").lower()
+        if "text/event-stream" not in ctype:
+            try:
+                data = resp.json()
+            except ValueError:
+                return None
+            items = data if isinstance(data, list) else [data]
+            return next((m for m in items if isinstance(m, dict) and m.get("id") == req_id), None)
+        for raw in resp.iter_lines(decode_unicode=True):
+            if raw and raw.startswith("data:"):
+                try:
+                    msg = json.loads(raw[5:].strip())
+                except ValueError:
+                    continue
+                if isinstance(msg, dict) and msg.get("id") == req_id:
+                    return msg
+        return None
+
+    def send_notification(self, method: str, params: Dict[str, Any]) -> None:
+        try:
+            self._post({"jsonrpc": "2.0", "method": method, "params": params}, 10).close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def stop(self) -> None:
+        self._running = False
+        try:
+            if self._http is not None:
+                self._http.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 class McpToolWrapper(BaseTool):
     """Wraps an MCP tool into an Arena BaseTool."""
 

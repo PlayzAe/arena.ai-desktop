@@ -170,7 +170,7 @@ def _find_preview_url(val):
     return None
 
 
-from arena import agent, components, connectors, contracts, crypto, history_sync, native_agent, permissions, workspace
+from arena import agent, components, updater, connectors, contracts, crypto, history_sync, native_agent, permissions, sandbox_sync, workspace
 from arena.gateway import GatewayManager
 from arena.api import generate_uuidv7
 from arena.auth import get_clipboard_text
@@ -269,7 +269,7 @@ STATIC_DIR = _base / "arena" / "web" / "static" if getattr(sys, 'frozen', False)
 
 app = Flask(__name__, static_folder=str(STATIC_DIR), static_url_path="/static")
 
-APP_VERSION = "1.5.0"
+from arena import __version__ as APP_VERSION  # single source: arena/__init__.py
 
 _API_TOKEN = secrets.token_urlsafe(32)
 # Read-only key for /preview/<key>/...: it only serves files of the chosen
@@ -722,6 +722,7 @@ def _auto_agent_model(preferred_id: str = None) -> Optional[dict]:
 @app.route("/")
 def index():
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    html = re.sub(r"\?v=[\w.]+", f"?v={APP_VERSION}", html)  # cache-bust with the real app version
     html = html.replace("</head>", f'  <meta name="api-token" content="{_API_TOKEN}">\n'
                                    f'  <meta name="preview-token" content="{_PREVIEW_TOKEN}">\n</head>', 1)
     return html, 200, {"Content-Type": "text/html; charset=utf-8"}

@@ -186,6 +186,7 @@ def normalize_server_entry(name: str, raw: Any) -> Dict[str, Any]:
         "command": str(command) if command else None,
         "args": [str(arg) for arg in args],
         "url": str(url) if url else None,
+        "headers": {str(k): str(v) for k, v in (raw.get("headers") or {}).items()} if isinstance(raw.get("headers"), dict) else {},
         "env": {str(k): str(v) for k, v in env.items()},
         "cwd": str(raw.get("cwd")) if raw.get("cwd") else None,
         "enabled": enabled,
@@ -324,7 +325,7 @@ class ConnectorManager:
     def _drop_stale(self, servers: Dict[str, Dict[str, Any]]) -> None:
         for name in list(self._clients):
             server = servers.get(name)
-            if server is None or not server.get("enabled") or server.get("transport") != "stdio" \
+            if server is None or not server.get("enabled") \
                     or self._signatures.get(name) != self._signature(server):
                 self.disconnect(name)
 
@@ -348,7 +349,7 @@ class ConnectorManager:
             "servers": summaries,
             "presets": [_public_preset(p, p["id"] in installed_ids or p["id"] in servers)
                         for p in official_presets(workspace)],
-            "transports": {"stdio": True, "http": False},
+            "transports": {"stdio": True, "http": True},
         }
 
     def _summary(self, server: Dict[str, Any]) -> Dict[str, Any]:
@@ -361,8 +362,6 @@ class ConnectorManager:
             client = None
         if not server["enabled"]:
             status = "disabled"
-        elif server["transport"] != "stdio":
-            status = "unsupported"
         elif running:
             status = "connected"
         elif self._errors.get(name):
@@ -398,9 +397,24 @@ class ConnectorManager:
             raise KeyError(f"Connector not found: {name}")
         if not server["enabled"]:
             raise ValueError("Connector is disabled in mcp.json")
-        if server["transport"] != "stdio":
+        if server["transport"] == "http":
+            if not server.get("url"):
+                raise ValueError("HTTP connector has no url")
             with self._lock:
-                self._errors[name] = "Remote HTTP/SSE MCP transport is not supported in this version; use a local STDIO command."
+                existing = self._clients.get(name)
+                if existing and existing.process and existing.process.poll() is None \
+                        and self._signatures.get(name) == self._signature(server):
+                    return self._summary(server)
+                self.disconnect(name)
+                from arena.tools.mcp import McpHttpClient
+                client = McpHttpClient(expand_env_value(server["url"]),
+                                       {k: expand_env_value(v) for k, v in (server.get("headers") or {}).items()})
+                if client.start(timeout=timeout):
+                    self._clients[name] = client
+                    self._signatures[name] = self._signature(server)
+                    self._errors.pop(name, None)
+                else:
+                    self._errors[name] = client.last_error or "MCP server did not answer"
                 return self._summary(server)
         if not server.get("command"):
             raise ValueError("STDIO connector has no command")
@@ -492,7 +506,7 @@ class ConnectorManager:
         except ValueError:
             return {}
         for server in servers.values():
-            if server.get("enabled") and server.get("transport") == "stdio":
+            if server.get("enabled") and server.get("transport") in ("stdio", "http"):
                 try:
                     self.connect(server["name"], timeout=timeout)
                 except Exception:

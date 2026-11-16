@@ -94,9 +94,7 @@
       accounts: Array.isArray(data.accounts) ? data.accounts : null,
       current_account_id: data.current_account_id ?? null,
       challenge: data.challenge ?? null,
-      gateway: data.gateway ?? null,
-      arena_status: data.arena_status && typeof data.arena_status === 'object' ? data.arena_status : null,
-      arena_unavailable: typeof data.arena_unavailable === 'string' ? data.arena_unavailable : null
+      gateway: data.gateway ?? null
     };
   }
 
@@ -594,16 +592,10 @@
   function normalizeActivity(raw, type = 'tool') {
     if (!raw || typeof raw !== 'object') return null;
     const input = raw.input && typeof raw.input === 'object' ? raw.input : {};
-    let command = String(raw.command ?? input.command ?? raw.cmd ?? '');
+    const command = String(raw.command ?? input.command ?? raw.cmd ?? '');
     const path = String(raw.path ?? input.path ?? input.file_path ?? input.file ?? '');
     const name = String(raw.name ?? raw.tool ?? raw.title ?? (type === 'sandbox' ? "Sandbox" : "Tool"));
-    let detail = String(raw.detail ?? raw.description ?? raw.message ?? raw.note ?? raw.output ?? '');
-    // Arena Agent sandbox commands arrive as the row's detail: show them as
-    // the call ("Bash(npm install)"), not as its output.
-    if (type === 'sandbox' && raw.kind === 'run' && !command && detail) {
-      command = detail;
-      detail = '';
-    }
+    const detail = String(raw.detail ?? raw.description ?? raw.message ?? raw.note ?? raw.output ?? '');
     return {
       id: raw.id ? String(raw.id) : `activity-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       kind: type,
@@ -616,83 +608,6 @@
       url: safeUrl(raw.url ?? ''),
       raw
     };
-  }
-
-  /* Pre-1.5 chats: tool calls stayed as <tool> tags in the reply, their
-     results came back as "Tool results:" user turns, and saved steps kept
-     only a summary. These rebuild the call + output rows newer chats save. */
-  const LEGACY_TOOL_RE = /<tool\s+name\s*=\s*["']?([\w-]+)["']?\s*>([\s\S]*?)<\/tool\s*>/gi;
-  const LEGACY_PARAM_RE = /<([A-Za-z_][\w-]*)>([\s\S]*?)<\/\1\s*>/g;
-  const LEGACY_INVOKE_RE = /<invoke\s+name\s*=\s*["']?([\w-]+)["']?\s*>([\s\S]*?)<\/invoke\s*>/gi;
-  const LEGACY_INVOKE_PARAM_RE = /<parameter\s+name\s*=\s*["']?([\w-]+)["']?\s*>([\s\S]*?)<\/parameter\s*>/gi;
-  const LEGACY_BULKY = new Set(['content', 'new_text', 'old_text', 'new_string', 'old_string']);
-  const LEGACY_RESULT_RE = /^\[(\d+)\] ([\w-]+)(?: (.*?))?: (ok|error|skipped|cancelled|denied by the user|blocked(?:: [^\n]*| by safety rules)?)$/;
-
-  function legacyToolActivities(text) {
-    const out = [];
-    const add = (name, body, paramRe) => {
-      const input = {};
-      for (const param of body.matchAll(paramRe)) {
-        const key = param[1].toLowerCase();
-        if (!LEGACY_BULKY.has(key)) input[key] = param[2].trim().slice(0, 400);
-      }
-      const tool = name.toLowerCase();
-      const activity = normalizeActivity({
-        tool, name: tool, input, legacy: true, status: '',
-        command: tool === 'run_cmd' ? (input.cmd || input.command || '') : '',
-        background: /^(1|true|yes)$/i.test(input.background || '') || undefined
-      }, 'tool');
-      if (activity) out.push(activity);
-    };
-    const source = String(text || '');
-    for (const match of source.matchAll(LEGACY_TOOL_RE)) add(match[1], match[2], LEGACY_PARAM_RE);
-    for (const match of source.matchAll(LEGACY_INVOKE_RE)) add(match[1], match[2], LEGACY_INVOKE_PARAM_RE);
-    return out;
-  }
-
-  function legacyToolResults(text) {
-    const results = [];
-    let current = null;
-    for (const line of String(text || '').replace(/\r\n/g, '\n').split('\n')) {
-      if (!current && /^Tool results:/.test(line)) continue;
-      if (line.startsWith('Continue the task.')) break;
-      const head = line.match(LEGACY_RESULT_RE);
-      if (head) {
-        current = { tool: head[2].toLowerCase(), status: head[4], lines: [] };
-        results.push(current);
-      } else if (current) {
-        current.lines.push(line);
-      }
-    }
-    return results.map((result) => ({ ...result, output: result.lines.join('\n').replace(/\s+$/, '') }));
-  }
-
-  // A saved step from before steps kept their command or path: read them back from the summary.
-  function backfillToolStep(step) {
-    if (!step || step.command || step.rel || step.input || step.child_id || step.mcp) return step;
-    const summary = String(step.summary || '');
-    const run = summary.match(/^(Run|Start in background): ([\s\S]+)$/);
-    if (run) return { ...step, command: run[2], background: run[1] !== 'Run' || undefined };
-    const stop = summary.match(/^Stop background command (\S+)/);
-    if (stop) return { ...step, command: stop[1] };
-    const target = summary.match(/^(?:Create folder|Delete folder|Create|Overwrite|Edit|Delete|Read|List|Search)\s+(.+?)(?:\s+\(\d+ (?:lines?|items?)\))?$/);
-    return target ? { ...step, rel: target[1] } : step;
-  }
-
-  // Older chats saved the app's injected guide or memory text in front of the
-  // user's own words, which follow the last of these markers.
-  function userWordsAfterInjection(text) {
-    const source = String(text || '');
-    let cut = -1;
-    for (const marker of ['User message:\n', '[End of memory]\n']) {
-      const at = source.lastIndexOf(marker);
-      if (at >= 0) cut = Math.max(cut, at + marker.length);
-    }
-    if (cut < 0) {
-      const note = source.match(/^\[Arena Desktop\] This chat's project folder is now [^\n]*\n/);
-      if (note) cut = note[0].length;
-    }
-    return cut >= 0 ? source.slice(cut).trim() : '';
   }
 
   function normalizeArtifact(raw, kind = 'file') {

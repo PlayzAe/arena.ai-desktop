@@ -258,6 +258,7 @@ def api_memory_save():
 
 
 _update_cache = {"t": 0.0, "data": None}
+_release_cache: dict = {}
 
 
 def _version_tuple(v) -> tuple:
@@ -302,12 +303,47 @@ def api_update_check():
             data["url"] = payload.get("html_url")
             data["prerelease"] = bool(payload.get("prerelease"))
             data["update"] = bool(latest) and _version_tuple(latest) > _version_tuple(APP_VERSION)
+            data.update(updater.release_info(payload))
+            _release_cache[channel] = payload
         else:
             data["error"] = f"GitHub returned {r.status_code}"
     except Exception as e:
         data["error"] = f"{type(e).__name__}: {e}"
     slot.update(t=now, data=data)
     return jsonify(dict(data, enabled=enabled))
+
+
+@app.route("/api/update/download", methods=["POST"])
+def api_update_download():
+    beta = load_config().get("beta_updates") is True
+    channel = "beta" if beta else "stable"
+    info = (_update_cache.get(channel) or {}).get("data")
+    release = _release_cache.get(channel)
+    if not info or not info.get("update") or not release:
+        return jsonify({"ok": False, "error": "Check for updates first."}), 400
+    result = updater.start_download(info, release)
+    return jsonify(result), (200 if result.get("ok") else 400)
+
+
+@app.route("/api/update/status")
+def api_update_status():
+    return jsonify(updater.status())
+
+
+@app.route("/api/update/apply", methods=["POST"])
+def api_update_apply():
+    result = updater.apply()
+    if result.get("ok"):
+        threading.Timer(0.8, os._exit, args=(0,)).start()
+    return jsonify(result), (200 if result.get("ok") else 400)
+
+
+@app.route("/api/update/whatsnew", methods=["GET", "DELETE"])
+def api_update_whatsnew():
+    if request.method == "DELETE":
+        updater.clear_whatsnew()
+        return jsonify({"ok": True})
+    return jsonify(updater.read_whatsnew() or {})
 
 
 def _settings_bundle() -> dict:

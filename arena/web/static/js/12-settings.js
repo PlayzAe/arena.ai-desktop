@@ -27,6 +27,7 @@
         resetWorkspaceTree();
         updateComposerState();
         renderWorkspaceTreePanel();
+        scheduleWorkspaceTreeRefresh(0);
       }
       return state.workspace;
     } catch (error) {
@@ -105,8 +106,6 @@
         el('span', { class: 'status-dot ' + (state.authenticated ? 'is-online' : 'is-pending'), 'aria-hidden': 'true' })
       );
       wrap.appendChild(account);
-      const task = state.accountTask;
-      if (task && task.kind !== 'cookie') wrap.appendChild(accountTaskLine(task));
 
       const actions = el('div', { class: 'setting-actions' });
       if (!state.authenticated) {
@@ -117,8 +116,7 @@
           { variant: 'primary', disabled: state.loginPending || Boolean(state.serverError) || state.networkOffline }
         ));
       } else {
-        actions.appendChild(settingsActionButton(accountTaskRunning('signout') ? 'Signing out…' : 'Log out', 'logout',
-          async () => { await logoutAccount(); refreshPanel(); }, { disabled: Boolean(state.accountBusy) }));
+        actions.appendChild(settingsActionButton('Log out', 'logout', async () => { await logoutAccount(); refreshPanel(); }));
       }
       actions.appendChild(settingsActionButton('Open arena.ai window', 'external', async () => {
         if (state.engineOpen) await hideEngine(); else await showEngine();
@@ -131,16 +129,13 @@
         wrap.appendChild(el('p', { class: 'modal-copy', text: 'On arena.ai in your browser: DevTools → Application → Cookies → arena.ai. Copy the arena-auth-prod-v1 lines as name=value pairs and paste them here.' + (state.authenticated ? ' The new account becomes current; your saved accounts stay in the account menu.' : '') }));
         const cookieField = el('textarea', { class: 'input mono cookie-field', rows: '3', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false',
           'aria-label': 'Arena cookies', placeholder: 'arena-auth-prod-v1.0=…; arena-auth-prod-v1.1=…' });
-        const checking = accountTaskRunning('cookie');
-        const importButton = settingsActionButton(checking ? 'Checking cookies…' : state.authenticated ? 'Add account with cookies' : 'Sign in with cookies', 'login', async () => {
+        const importButton = settingsActionButton(state.authenticated ? 'Add account with cookies' : 'Sign in with cookies', 'login', async () => {
           const cookie = cookieField.value.trim();
           cookieField.value = '';
           if (!cookie) { toast('Paste the cookies first.', 'warning'); return; }
           await loginWithCookie(cookie);
-        }, { disabled: state.loginPending || state.accountBusy || Boolean(state.serverError) || state.networkOffline });
-        if (checking) cookieField.disabled = true;
+        }, { disabled: state.loginPending || Boolean(state.serverError) || state.networkOffline });
         wrap.append(cookieField, el('div', { class: 'setting-actions', style: { marginTop: '8px' } }, importButton));
-        if (task?.kind === 'cookie') wrap.appendChild(accountTaskLine(task));
         wrap.appendChild(el('p', { class: 'field-help', text: 'Cookies give full access to your account — never share them. They are stored only on this computer.' }));
       }
       if (state.serverError) {
@@ -249,6 +244,7 @@
           resetWorkspaceTree();
           updateComposerState();
           renderWorkspaceTreePanel();
+          scheduleWorkspaceTreeRefresh(0);
           refreshPanel();
         }));
       }
@@ -720,10 +716,16 @@
           <span class="modal-field-label">${esc(a.email || id)}</span>
           <span class="muted">${esc(bits.join(' \u00B7 '))}${models ? `<br>${esc(models)}` : ''}</span></div>`;
       };
-      const live = (data.live || {})[data.current_account] || null;
-      const liveHtml = live && (live.remaining != null || live.reset)
-        ? `<div class="modal-field-row"><span class="modal-field-label">Arena says</span>
-            <span>${live.remaining != null ? `<strong class="tabular">${esc(live.remaining)}</strong> requests left` : 'Limit reported'}${live.modality ? ` · ${esc(live.modality)}` : ''}${live.reset ? ` · ${esc(humanWait(live.reset - Date.now() / 1000))}` : ''}<br><span class="muted">as of ${esc(new Date(live.ts * 1000).toLocaleTimeString())} — Arena only reports this with replies</span></span></div>`
+      const BUCKET_NAMES = { evaluation: 'Chat, Code, Direct, Battle', agent: 'Agent' };
+      const buckets = (data.buckets || {})[data.current_account] || {};
+      const bucketRows = Object.entries(buckets).map(([name, b]) => {
+        const left = b.remaining != null ? `<strong class="tabular">${esc(b.remaining)}</strong>${b.limit != null ? ` of ${esc(b.limit)}` : ''} left` : 'Limit reported';
+        const reset = b.reset ? ` \u00B7 resets in ${esc(humanWait(b.reset - Date.now() / 1000))}` : '';
+        return `<div class="modal-field-row"><span class="modal-field-label">${esc(BUCKET_NAMES[name] || name)}</span>
+          <span>${left}${reset}<br><span class="muted">as of ${esc(new Date(b.ts * 1000).toLocaleTimeString())}</span></span></div>`;
+      }).join('');
+      const liveHtml = bucketRows
+        ? bucketRows + '<p class="modal-note">Arena reports each limit with its replies, so a bucket shows after you send in that mode.</p>'
         : '<p class="modal-note">Arena reports your remaining requests with each reply. Send a message to see it here.</p>';
       const todayHtml = Object.keys(today).length
         ? Object.entries(today).map(([id, a]) => accountRow(id, a)).join('')
@@ -796,7 +798,9 @@
       }
       const updActions = el('div', { class: 'setting-actions' });
       if (info?.update && info?.url) {
-        updActions.appendChild(settingsActionButton(`Get ${info.latest}`, 'download', async () => { window.open(info.url, '_blank', 'noopener'); }, { variant: 'primary' }));
+        updActions.appendChild(settingsActionButton(info.can_install ? `Update to ${info.latest}` : `Get ${info.latest}`, 'download', async () => {
+          if (info.can_install) openUpdateModal(info); else window.open(info.url, '_blank', 'noopener');
+        }, { variant: 'primary' }));
       }
       updActions.appendChild(settingsActionButton('Check for updates', 'refresh', async () => {
         const fresh = await API.updateCheck(true);
@@ -902,47 +906,27 @@
 
       wrap.appendChild(el('h3', { class: 'modal-section-title', text: 'Quick diagnostics' }));
       const diagList = el('div', { class: 'diag-list' });
-      const testNames = ['Arena.ai connection', 'Arena.ai service status', 'Account health', 'Encryption (DPAPI)', 'Workspace access', 'Update server (GitHub)'];
-      // rows are matched by name, so a check added on the server cannot shift the others
-      const diagRow = (name) => {
-        let row = [...diagList.children].find((node) => node.dataset.name === name);
-        if (!row) {
-          row = el('div', { class: 'diag-row diag-pending', dataset: { name } },
-            el('span', { class: 'diag-dot' }),
-            el('span', { class: 'diag-text' },
-              el('span', { class: 'diag-name', text: name }),
-              el('span', { class: 'diag-detail' })),
-            el('span', { class: 'diag-ms' })
-          );
-          diagList.appendChild(row);
-        }
-        return row;
-      };
-      testNames.forEach(diagRow);
+      const testNames = ['Arena.ai connection', 'Account health', 'Encryption (DPAPI)', 'Workspace access', 'Update server (GitHub)'];
+      testNames.forEach(name => {
+        diagList.appendChild(el('div', { class: 'diag-row diag-pending' },
+          el('span', { class: 'diag-dot' }),
+          el('span', { class: 'diag-name', text: name }),
+          el('span', { class: 'diag-ms' })
+        ));
+      });
       const runBtn = settingsActionButton('Run all tests', 'play', async () => {
         runBtn.disabled = true;
-        diagList.querySelectorAll('.diag-row').forEach(r => {
-          r.className = 'diag-row diag-running';
-          r.querySelector('.diag-ms').textContent = '';
-          r.querySelector('.diag-detail').textContent = '';
-          r.title = '';
-        });
+        diagList.querySelectorAll('.diag-row').forEach(r => { r.className = 'diag-row diag-running'; r.querySelector('.diag-ms').textContent = ''; });
         try {
           const data = await API.diagnosticsRun();
-          (data?.results || []).forEach((r) => {
-            if (!r || !r.name) return;
-            const row = diagRow(r.name);
-            row.className = 'diag-row ' + (r.ok === true ? 'diag-pass' : r.ok === false ? 'diag-fail' : 'diag-skip');
-            row.querySelector('.diag-ms').textContent = r.ok === null || r.ok === undefined ? '—' : r.ms + 'ms';
-            row.querySelector('.diag-detail').textContent = r.detail || '';
-            row.title = r.detail || '';
+          const rows = diagList.querySelectorAll('.diag-row');
+          (data?.results || []).forEach((r, i) => {
+            if (!rows[i]) return;
+            rows[i].className = 'diag-row ' + (r.ok === true ? 'diag-pass' : r.ok === false ? 'diag-fail' : 'diag-skip');
+            rows[i].querySelector('.diag-ms').textContent = r.ok === null ? (r.detail || '—') : r.ms + 'ms';
+            if (r.detail && r.ok === false) rows[i].title = r.detail;
           });
-        } catch (err) {
-          diagList.querySelectorAll('.diag-row').forEach(r => {
-            r.className = 'diag-row diag-fail';
-            r.querySelector('.diag-detail').textContent = 'The checks did not run. Try again.';
-          });
-        }
+        } catch { diagList.querySelectorAll('.diag-row').forEach(r => { r.className = 'diag-row diag-fail'; }); }
         runBtn.disabled = false;
       });
       const diagActions = el('div', { class: 'setting-actions' });

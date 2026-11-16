@@ -12,7 +12,10 @@ pytestmark = pytest.mark.skipif(os.environ.get('RUN_BROWSER_TESTS') != '1', reas
 @pytest.fixture(scope='module')
 def site():
     from werkzeug.serving import make_server
-    from arena.web.app import app
+    from arena.web.app import app, load_config, save_config
+    cfg = load_config()
+    cfg['setup_done'] = True
+    save_config(cfg)
     server = make_server('127.0.0.1', 0, app, threaded=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -100,7 +103,7 @@ def test_demo_and_real_history_contract(site):
         page.get_by_text('Saved answer A').wait_for()
         page.get_by_text('Saved answer B').wait_for()
         body = page.locator('body').inner_text()
-        assert 'Model One' in body and 'Model Two' in body and 'read_file' in body
+        assert 'Model One' in body and 'Model Two' in body and 'Read' in body
         page.locator('#prompt').fill('Stream check')
         page.locator('#prompt').press('Enter')
         page.get_by_text('Stream A').wait_for(timeout=10000)
@@ -363,7 +366,7 @@ def test_v41_stale_status_cannot_flip_agent_back_to_direct(site):
 
         page.locator('#connectorList').get_by_text('GitHub').first.wait_for()
         panel = page.locator('#connectorList').inner_text()
-        assert 'official arena connectors' in panel.lower()
+        assert 'arena connectors' in panel.lower()
         assert 'Notion' in panel and 'Connected to account' in panel
 
         def option(name):
@@ -458,11 +461,11 @@ def test_v42_demo_agent_kinds_and_direct_tools_toggle(site):
         page.get_by_role('button', name='Allow once').click(timeout=10000)
         page.locator('#stopButton').wait_for(state='hidden', timeout=20000)
 
-        # A started chat is locked like on arena.ai: switching the mode is
-        # impossible until a new chat is created.
-        assert page.locator('#modeButton').is_disabled()
-        page.locator('#newChatBtn').click()
+        # Like on arena.ai, the mode menu stays usable in a started chat:
+        # picking another mode opens a new chat in that mode.
+        assert page.locator('#modeButton').is_enabled()
         choose_mode(page, 'Direct')
+        page.wait_for_function("document.querySelectorAll('.message-turn').length === 0", timeout=5000)
         # Workspace Sync: the switch next to the permission chip controls
         # whether Direct gets the folder-tools loop on this computer, and it
         # is visible right away (not only after a mode is picked).
@@ -501,9 +504,9 @@ def test_v46_demo_battle_vote_reveals_models_and_locks_chat(site):
         page.locator('.vote-bar').wait_for(timeout=30000)
         assert page.locator('.vote-btn', has_text='A is better').is_enabled()
 
-        # The chat is locked after its first message.
-        assert page.locator('#modeButton').is_disabled()
-        assert page.locator('#modalityButton').is_disabled()
+        # Mode/work-type menus stay available (they open a new chat).
+        assert page.locator('#modeButton').is_enabled()
+        assert page.locator('#modalityButton').is_enabled()
 
         page.locator('.vote-btn', has_text='A is better').click()
         page.locator('.vote-bar.is-done').wait_for(timeout=10000)
@@ -528,9 +531,9 @@ def test_v461_new_chat_unlocks_model_selection_without_typing(site):
         page.get_by_text('Demonstration Response').wait_for(timeout=30000)
         page.locator('#stopButton').wait_for(state='hidden', timeout=30000)
 
-        # The started chat is locked...
-        assert page.locator('[data-model-picker]').first.is_disabled()
-        assert page.locator('#modelsNavBtn').is_disabled()
+        # Direct may swap models between messages, like on arena.ai.
+        assert page.locator('[data-model-picker]').first.is_enabled()
+        assert page.locator('#modelsNavBtn').is_enabled()
 
         # ...but a freshly created chat must be editable immediately, before
         # the user types into the composer or clicks anywhere else.
@@ -542,6 +545,24 @@ def test_v461_new_chat_unlocks_model_selection_without_typing(site):
         page.locator('.popover-option').first.wait_for(timeout=10000)
         assert page.locator('.popover-option').count() > 0
         page.keyboard.press('Escape')
+
+        # Work type inside a started chat: arena.ai asks, then opens a new chat.
+        page.locator('#prompt').fill('Second chat to check the work type rule')
+        page.locator('#prompt').press('Enter')
+        page.get_by_text('Demonstration Response').nth(1).wait_for(timeout=30000)
+        page.locator('#stopButton').wait_for(state='hidden', timeout=30000)
+        page.locator('#modalityButton').click()
+        page.locator('.popover-menu .popover-option', has_text='Code').first.click()
+        page.get_by_text('Start new chat session?').wait_for(timeout=5000)
+        assert 'Your current session will be saved in your chat history.' in page.locator('.modal-copy').first.inner_text()
+        page.get_by_role('button', name='Continue').click()
+        page.wait_for_function("document.querySelector('#modalityLabel')?.textContent.trim() === 'Code'", timeout=10000)
+        page.wait_for_function("document.querySelectorAll('.message-turn').length === 0", timeout=5000)
+        # First Code message with Workspace Sync unable to save files: explain and ask.
+        page.locator('#prompt').fill('Build a landing page')
+        page.locator('#prompt').press('Enter')
+        page.get_by_text('Save the generated files on this computer?').wait_for(timeout=5000)
+        page.get_by_role('button', name='Cancel').click()
         assert not errors
         browser.close()
 
@@ -634,8 +655,7 @@ def test_v47_battle_lane_error_avatar_and_model_logo(site):
         errors, chat_bodies = [], []
         page.on('pageerror', lambda err: errors.append(str(err)))
         chat_id = '12345678-1234-1234-1234-123456789abc'
-        avatar = ("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' "
-                  "width='32' height='32'%3E%3Ccircle cx='16' cy='16' r='16' fill='%23377dff'/%3E%3C/svg%3E")
+        avatar = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
 
         def fulfill(route, value, status=200):
             return route.fulfill(status=status, content_type='application/json',
@@ -891,7 +911,7 @@ def test_v410_parallel_chats_status_marks_and_account_switching(site):
         menu = page.locator('.account-menu')
         menu.wait_for()
         menu_text = menu.inner_text()
-        assert 'demo@local.invalid' in menu_text and 'CURRENT' in menu_text
+        assert 'demo@local.invalid' in menu_text and 'current' in menu_text.lower()
         assert 'second@local.invalid' in menu_text
         assert 'Session expired: sign in' in menu_text
         assert 'Add account' in menu_text and 'Sign out' in menu_text

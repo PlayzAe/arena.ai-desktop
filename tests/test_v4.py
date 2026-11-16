@@ -115,9 +115,9 @@ def test_connector_config_presets_env_and_http_reporting(tmp_path):
     manager = connectors.ConnectorManager(lambda: tmp_path, config_path=config)
     manager.add_entry("remote", {"url": "https://example.test/mcp", "type": "streamable-http"})
     summary = {item["name"]: item for item in manager.list()["servers"]}["remote"]
-    assert summary["status"] == "unsupported" and summary["transport"] == "http"
-    connected = manager.connect("remote")
-    assert connected["status"] == "unsupported" and "STDIO" in connected["error"]
+    assert summary["status"] == "stopped" and summary["transport"] == "http"
+    connected = manager.connect("remote", timeout=2)  # nothing answers at example.test: an error, never a hang
+    assert connected["status"] == "error" and connected["error"]
     with pytest.raises(ValueError, match="already exists"):
         manager.add_entry("remote", {"url": "https://example.test/other"})
 

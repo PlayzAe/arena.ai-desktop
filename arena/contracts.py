@@ -529,7 +529,12 @@ def sandbox_op(call: Dict[str, Any]) -> Dict[str, Any]:
     elif op["path"]:
         op["kind"] = "read" if any(w in low or w == sub for w in _LOOK_WORDS) else "touch"
     elif any(w in low for w in ("bash", "shell", "terminal", "exec", "command", "run")):
-        op.update(kind="run", detail=str(args.get("command") or args.get("cmd") or "")[:200])
+        cmd = str(args.get("command") or args.get("cmd") or "")
+        op.update(kind="run", detail=cmd[:200], command=cmd)
+    elif "npm" in low and "install" in low:
+        pk = args.get("packages") or args.get("package") or args.get("names") or []
+        pk = [pk] if isinstance(pk, str) else [str(x) for x in pk if isinstance(x, (str, int, float))]
+        op.update(kind="npm", detail=" ".join(pk)[:200], packages=pk)
     else:
         op.update(kind="other", detail=", ".join(str(k) for k in list(args)[:4]))
     return op
@@ -567,7 +572,7 @@ def find_media(value: Any) -> List[Dict[str, str]]:
             mime = str(v.get("mimeType") or v.get("contentType") or v.get("mediaType") or "")
             kind = mime.split("/", 1)[0]
             if kind in ("image", "video", "audio"):
-                url = next((v[k] for k in ("url", "src", "imageUrl", "videoUrl", "audioUrl")
+                url = next((v[k] for k in ("url", "src", "image", "imageUrl", "videoUrl", "audioUrl")
                             if isinstance(v.get(k), str)), None)
                 if url and url.startswith(("https://", "http://", "data:")):
                     add(url, kind)
