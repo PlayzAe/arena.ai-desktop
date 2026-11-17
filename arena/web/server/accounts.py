@@ -205,6 +205,7 @@ def api_status():
         "mode": _ui_mode, "modality": _ui_modality, "eval_id": client.eval_id,
         "desktop": _engine_on(), "engine": ENGINE.state(), "permission_mode": _perm_mode(),
         "app_version": APP_VERSION, "workspace_chosen": _chosen_ws() is not None,
+        "workspace_missing": bool(_chosen_ws() is not None and not Path(_chosen_ws()).exists()),
         "workspace": str(_workspace_dir()), "projects_dir": str(workspace.PROJECTS_DIR),
         "pending_permissions": len(BROKER.pending()),
         "gateway": _GATEWAY.summary() if _GATEWAY is not None else {"active": False, "state": "off", "servers": 0},
@@ -513,6 +514,30 @@ def api_settings():
             cfg[key] = val
     save_config(cfg)
     return jsonify({"ok": True})
+
+
+_pulse_cache = {"t": 0.0, "data": None}
+
+
+@app.route("/api/usage/pulse")
+def api_usage_pulse():
+    """Arena's own daily-credit meter (/api/me/pulse): percent of the day's credits left, and when they refresh."""
+    if _pulse_cache["data"] is not None and time.time() - _pulse_cache["t"] < 15:
+        return jsonify(_pulse_cache["data"])
+    data, error, _status = _arena_get_json("/api/me/pulse", timeout=15)
+    if error or not isinstance(data, dict) or not isinstance(data.get("pulse"), (int, float)):
+        return jsonify({"ok": False, "error": error or "Arena did not report credits."})
+    reset = None
+    try:
+        import datetime as _dt
+        stamp = _dt.datetime.fromisoformat(str(data.get("refreshedAt")).replace("Z", "+00:00"))
+        reset = int(stamp.timestamp()) if stamp.timestamp() > time.time() else None
+    except (TypeError, ValueError):
+        pass
+    out = {"ok": True, "left": max(0, min(100, int(data["pulse"]))), "reset": reset,
+           "started": bool(data.get("windowStarted"))}
+    _pulse_cache.update(t=time.time(), data=out)
+    return jsonify(out)
 
 
 @app.route("/api/usage")

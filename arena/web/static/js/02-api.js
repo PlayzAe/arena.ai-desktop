@@ -117,6 +117,8 @@
     diagnostics() { return this.request('/api/diagnostics'); },
     diagnosticsRun() { return this.request('/api/diagnostics/run'); },
     getUsage() { return this.request('/api/usage'); },
+    getPulse() { return this.request('/api/usage/pulse'); },
+    syncProject(chatId) { return this.request(`/api/chats/${encodeURIComponent(chatId)}/sync-project`, { method: 'POST', body: {} }); },
     getGateway() { return this.request('/api/gateway'); },
     startGateway() { return this.request('/api/gateway/start', { method: 'POST', body: {} }); },
     stopGateway() { return this.request('/api/gateway/stop', { method: 'POST', body: {} }); },

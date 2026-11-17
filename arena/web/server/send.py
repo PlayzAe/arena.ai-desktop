@@ -595,6 +595,7 @@ def _api_chat_impl():
             out = yield from _turn_auto(client, send, conv)
         out = out or {"a": "", "b": ""}
         if modality == "webdev":
+            yield from _sync_from_manifest(conv)
             yield from _finish_sandbox(conv)
         if modality == "webdev" and not conv.get("_preview_sent") and not dual:
             yield from _poll_webdev_preview(client, conv)
@@ -606,6 +607,7 @@ def _api_chat_impl():
             site_urls = _site_links(out.get("a") or "")
             for url in site_urls:
                 yield _sse({"type": "preview", "model": "a", "url": url, "title": "Site preview"})
+            site_urls = list(dict.fromkeys(site_urls + sorted(conv.get("previews") or [])))
             if site_urls:
                 reply["previews"] = site_urls
         reasoning = conv.get("reasoning") or {}

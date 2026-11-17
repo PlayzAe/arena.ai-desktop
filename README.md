@@ -46,6 +46,16 @@
 
 ## What's new in v1.6.0
 
+### After the first 1.6.0 builds: fixes from real use
+- **Dropped streams no longer lose the project.** After every Code turn the app asks Arena for the finished project (`/api/evaluation/webdev/<message id>`: every text file with its final content, the image names and the live site link) and brings your folder up to date. This is what fixes "Ready to build" showing locally while the real site was built on Arena.
+- **Generated images are fetched while the sandbox still serves them**, as soon as `generate_image` finishes. After Arena deploys, it answers 404 for `/images/...`; the app then tells you which images it could not get instead of failing silently.
+- **No more white "Local preview" box in Code mode.** The final `arena.site` link is kept per chat (it survives leaving and coming back). Arena forbids framing that site (`X-Frame-Options: SAMEORIGIN`), so **Preview** opens it in an app window and **Browser** in your browser.
+- **Usage meter shows Arena's real number.** It reads Arena's daily-credit meter (`/api/me/pulse`): "N% of today's credits left", when they refresh, and a "Daily limit reached" state. The old bar guessed a percentage and could show 82% on a fresh install.
+- **Missing folder:** if the chosen folder was deleted, you get a clear message to pick another one. New installs default to `Documents\Arena Desktop`.
+
+### About Arena's new daily limit
+Arena added a daily credit limit to something that used to be free. Per [Arena's own help page](https://help.arena.ai/articles/3295820808-arena-troubleshooting-daily-usage-limits?lang=en), it is one pool of credits for every feature, your 24 hours start at your first prompt, and it resets after 24 hours. Arena staff have also said that failed generations count as usage. People report hitting the wall after two or three prompts, Battle mode included. Arena is going to lose its fans over this, and this app can do nothing about it: it will not bypass, hide or reset the limit. It only shows Arena's own meter and tells you when the credits are gone and when they come back.
+
 ### Code mode saves the whole project
 - Arena's starter files (`package.json`, `tsconfig.json`, `vite.config.ts`, `index.html`, `src/main.tsx`, `src/App.tsx`, `src/utils/cn.ts`) are saved next to the files the AI writes, in one folder.
 - Images saved under `public/` are downloaded. `cp`, `mv` and `mkdir` from the sandbox are repeated locally.
@@ -53,6 +63,21 @@
 - Your own files are never overwritten by Arena's starter files.
 
 ### Install and update in one click
+
+<p align="center">
+  <img src="docs/screenshots/installer-1-ready.png" alt="Setup: step list, ready to install" width="230" />
+  <img src="docs/screenshots/installer-2-installing.png" alt="Setup finished: every step ticked" width="230" />
+  <img src="docs/screenshots/installer-4-up-to-date.png" alt="Setup says you already have the latest version" width="230" />
+</p>
+<p align="center">
+  <img src="docs/screenshots/uninstaller-2-done.png" alt="Uninstall Arena Desktop: removes the app and your app data, never your project folders" width="230" />
+  <img src="docs/screenshots/human-check.png" alt="Arena's human check: the desktop asks you to tick the box, it never ticks it for you" width="480" />
+</p>
+
+- **Setup** installs `Arena-Desktop.exe` and an own **`Uninstall Arena Desktop.exe`** into `%LOCALAPPDATA%\Programs\Arena Desktop`. Running Setup again says "You already have the latest version" (Repair) or offers the update.
+- **Uninstall** removes the app, shortcuts, the Settings > Apps entry and, if you leave the box ticked, your chats, settings and saved sign-ins. Code you generated (your project folders) is never deleted.
+- **Human check:** when arena.ai shows its "I'm not a robot" box, Arena Desktop pauses the message, brings the arena.ai window forward and resends after you tick it. It never solves the check itself.
+
 - `Arena-Desktop-Setup.exe` installs for your account (Start Menu and optional Desktop shortcut, entry in Settings > Apps, no admin rights).
 - When a newer version is released, **Update now** downloads it with a progress bar, checks its SHA-256, closes the app, installs it, reopens it and shows what is new.
 - Uninstall can also delete your chats, settings and saved sign-ins. Project folders are never touched.

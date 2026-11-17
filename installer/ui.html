@@ -173,13 +173,12 @@ async function init() {
   state = await pywebview.api.get_state();
   document.title = state.mode === 'install' ? 'Arena Desktop Setup' : 'Uninstall Arena Desktop';
   $('title').textContent = state.mode === 'install' ? 'Arena Desktop' : 'Remove Arena Desktop?';
-  $('sub').innerHTML = state.mode === 'install'
-    ? `Version ${state.version}${state.existing ? ' &middot; <b>update</b>' : ''}`
-    : 'Project folders are never touched.';
+  $('sub').innerHTML = state.subtitle;
+  if (state.notice) { const b = $('banner'); b.textContent = state.notice; b.className = 'banner show'; }
   $('where').textContent = state.path;
   build(state.steps); buildOpts(state.options);
   const go = $('go');
-  go.textContent = state.mode === 'install' ? (state.existing ? 'Update' : 'Install') : 'Uninstall';
+  go.textContent = state.button;
   if (state.mode !== 'install') go.classList.add('danger');
   go.onclick = async () => {
     if (started) return; started = true;

@@ -168,6 +168,7 @@ for ($i = 0; $i -lt 40 -and -not $ok; $i++) {
 if ($ok) {
   Remove-Item -LiteralPath $new -Force -ErrorAction SilentlyContinue
   try { Set-ItemProperty -Path '@@KEY@@' -Name DisplayVersion -Value $ver -ErrorAction Stop } catch {}
+  try { Set-Content -LiteralPath (Join-Path (Split-Path $target) 'version.txt') -Value $ver -Encoding UTF8 } catch {}
   Start-Process -FilePath $target
 }
 """

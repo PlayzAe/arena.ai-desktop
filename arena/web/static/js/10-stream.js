@@ -505,6 +505,7 @@
       return;
     }
     if (type === 'usage') {
+      void refreshPulse();
       if (event.remaining != null) state.usageRemaining = Number(event.remaining);
       if (event.reset != null) state.usageReset = Number(event.reset);
       if (event.modality) state.usageModality = String(event.modality);

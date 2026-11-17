@@ -22,7 +22,9 @@ from pathlib import Path
 APP_NAME = "Arena Desktop"
 EXE_NAME = "Arena-Desktop.exe"
 SETUP_NAME = "Arena-Desktop-Setup.exe"
-UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\ArenaDesktop"
+UNINSTALL_NAME = "Uninstall Arena Desktop.exe"
+UNINSTALLER_BUNDLE = "Uninstall-Arena-Desktop.exe"
+UNINSTALL_KEY = os.environ.get("ARENA_SETUP_REGKEY") or r"Software\Microsoft\Windows\CurrentVersion\Uninstall\ArenaDesktop"  # the override is for tests only
 INSTALL_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "Programs" / APP_NAME
 START_MENU = Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Windows" / "Start Menu" / "Programs"
 NO_WINDOW = 0x08000000
@@ -40,6 +42,8 @@ def app_version() -> str:
 
 
 def desktop_dir() -> Path:
+    if os.environ.get("ARENA_SETUP_NO_KILL"):  # test mode: never touch the real Desktop
+        return Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Desktop"
     r = subprocess.run(["powershell", "-NoProfile", "-Command", "[Environment]::GetFolderPath('Desktop')"],
                        capture_output=True, text=True, creationflags=NO_WINDOW)
     out = r.stdout.strip()
@@ -56,7 +60,43 @@ def make_shortcut(link: Path, target: Path) -> None:
 
 
 def stop_running_app() -> None:
+    if os.environ.get("ARENA_SETUP_NO_KILL"):
+        return
     subprocess.run(["taskkill", "/F", "/IM", EXE_NAME], capture_output=True, creationflags=NO_WINDOW)
+
+
+def installed_version() -> str:
+    """Version Windows has on record for the installed app, else the one next to the exe; '' when not installed."""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY) as k:
+            if (INSTALL_DIR / EXE_NAME).is_file():
+                return str(winreg.QueryValueEx(k, "DisplayVersion")[0])
+    except OSError:
+        pass
+    try:
+        return (INSTALL_DIR / "version.txt").read_text(encoding="utf-8").strip() if (INSTALL_DIR / EXE_NAME).is_file() else ""
+    except OSError:
+        return ""
+
+
+def _vt(v: str) -> tuple:
+    out = []
+    for bit in str(v or "").lstrip("v").split("."):
+        digits = "".join(c for c in bit if c.isdigit())
+        out.append(int(digits) if digits else 0)
+    return tuple(out) or (0,)
+
+
+def place_uninstaller() -> None:
+    """Put `Uninstall Arena Desktop.exe` in the program folder (Setup itself is not copied there)."""
+    src = bundle(UNINSTALLER_BUNDLE)
+    if not src.is_file() and getattr(sys, "frozen", False):
+        src = Path(sys.executable)  # a Setup built without the uninstaller can still remove the app
+    if src.is_file():
+        tmp = (INSTALL_DIR / UNINSTALL_NAME).with_suffix(".new")
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, INSTALL_DIR / UNINSTALL_NAME)
+    (INSTALL_DIR / SETUP_NAME).unlink(missing_ok=True)  # older builds left Setup here
 
 
 def register_uninstall(version: str) -> None:
@@ -64,8 +104,8 @@ def register_uninstall(version: str) -> None:
         for name, val in {
             "DisplayName": APP_NAME, "DisplayVersion": version, "Publisher": "Arena Desktop",
             "InstallLocation": str(INSTALL_DIR), "DisplayIcon": str(INSTALL_DIR / EXE_NAME),
-            "UninstallString": f'"{INSTALL_DIR / SETUP_NAME}" /uninstall',
-            "QuietUninstallString": f'"{INSTALL_DIR / SETUP_NAME}" /uninstall /S',
+            "UninstallString": f'"{INSTALL_DIR / UNINSTALL_NAME}"',
+            "QuietUninstallString": f'"{INSTALL_DIR / UNINSTALL_NAME}" /S',
         }.items():
             winreg.SetValueEx(k, name, 0, winreg.REG_SZ, val)
         winreg.SetValueEx(k, "NoModify", 0, winreg.REG_DWORD, 1)
@@ -85,8 +125,7 @@ def install(desktop_shortcut: bool, progress=lambda pct, msg: None) -> Path:
     tmp = target.with_suffix(".new")
     shutil.copyfile(payload, tmp)
     os.replace(tmp, target)
-    if getattr(sys, "frozen", False):
-        shutil.copyfile(sys.executable, INSTALL_DIR / SETUP_NAME)
+    place_uninstaller()
     (INSTALL_DIR / "version.txt").write_text(version, encoding="utf-8")
     progress(65, "Creating shortcuts")
     make_shortcut(START_MENU / f"{APP_NAME}.lnk", target)
@@ -326,6 +365,7 @@ class _Api:
                 {"icon": "close", "title": "Close running app", "sub": "Stops Arena Desktop if it is open"},
                 {"icon": "copy", "title": "Copy app files", "sub": "For your account only, no admin rights"},
                 {"icon": "link", "title": "Create shortcuts", "sub": "Start Menu, and Desktop if you want it"},
+                {"icon": "trash", "title": "Add the uninstaller", "sub": UNINSTALL_NAME + " in the program folder"},
                 {"icon": "shield", "title": "Register with Windows", "sub": f"Adds it to Settings > Apps as {version}"},
             ]
             options = [{"key": "desktop", "label": "Add a desktop shortcut", "on": True},
@@ -340,8 +380,21 @@ class _Api:
             ]
             options = [{"key": "purge", "label": "Also delete my chats, settings and saved sign-ins", "on": True}]
         shown = str(INSTALL_DIR).replace(str(Path.home()), "~")
-        return {"mode": self._mode, "version": version, "existing": (INSTALL_DIR / EXE_NAME).is_file(),
-                "path": shown, "steps": steps, "options": options}
+        have = installed_version()
+        subtitle, button, notice = f"Version {version}", "Install", ""
+        if self._mode == "uninstall":
+            subtitle, button = "Your project folders are never touched.", "Uninstall"
+        elif have and _vt(have) == _vt(version):
+            subtitle = f"Version {version} &middot; <b>up to date</b>"
+            button, notice = "Repair", f"You already have the latest version ({version}). Repair reinstalls the files and shortcuts."
+        elif have and _vt(have) < _vt(version):
+            subtitle, button = f"Version {version} &middot; <b>update from {have}</b>", "Update"
+        elif have:
+            subtitle, button = f"Version {version}", "Install anyway"
+            notice = f"A newer version ({have}) is already installed."
+        return {"mode": self._mode, "version": version, "existing": bool(have), "installed": have,
+                "up_to_date": bool(have) and _vt(have) == _vt(version), "subtitle": subtitle, "button": button,
+                "notice": notice, "path": shown, "steps": steps, "options": options}
 
     def start(self, opts: dict) -> bool:
         threading.Thread(target=self._run, args=(opts or {},), daemon=True).start()
@@ -367,8 +420,6 @@ class _Api:
                     tmp = self._target.with_suffix(".new")
                     shutil.copyfile(payload, tmp)
                     os.replace(tmp, self._target)
-                    if getattr(sys, "frozen", False):
-                        shutil.copyfile(sys.executable, INSTALL_DIR / SETUP_NAME)
                     (INSTALL_DIR / "version.txt").write_text(version, encoding="utf-8")
 
                 def shortcuts() -> None:
@@ -382,7 +433,9 @@ class _Api:
                 current = 2
                 self._step(2, "Shortcuts ready", shortcuts)
                 current = 3
-                self._step(3, f"Registered as {version}", lambda: register_uninstall(version))
+                self._step(3, "Uninstaller added", place_uninstaller)
+                current = 4
+                self._step(4, f"Registered as {version}", lambda: register_uninstall(version))
                 self._js(f"onDone(true,{json.dumps('Installed. Arena Desktop ' + version + ' is ready.')})")
             else:
                 purge = bool(opts.get("purge"))
@@ -434,9 +487,16 @@ def run_webview(mode: str) -> None:
     html = bundle("ui.html").read_text(encoding="utf-8")
     api._window = webview.create_window(
         "Arena Desktop Setup" if mode == "install" else "Uninstall Arena Desktop", html=html, js_api=api,
-        width=440, height=600 if mode == "install" else 640, resizable=False, frameless=True, easy_drag=True,
+        width=440, height=680 if mode == "install" else 660, resizable=False, frameless=True, easy_drag=True,
         background_color="#121514")
-    webview.start()
+    hook = os.environ.get("ARENA_SETUP_AUTOCLICK")  # automated screenshots only
+    if hook:
+        def autoclick() -> None:
+            time.sleep(float(hook) / 1000)
+            api._js("document.getElementById('go').click()")
+        webview.start(autoclick)
+    else:
+        webview.start()
 
 
 def run_gui() -> None:
@@ -456,7 +516,7 @@ def run_uninstall_gui() -> None:
 def main() -> int:
     args = {a.lower() for a in sys.argv[1:]}
     silent = bool(args & {"/s", "-s", "--silent", "/silent"})
-    if args & {"/uninstall", "--uninstall"}:
+    if args & {"/uninstall", "--uninstall"} or Path(sys.executable).stem.lower().startswith("uninstall"):
         if silent:
             uninstall(purge=bool(args & {"/purge", "--purge"}))
         else:

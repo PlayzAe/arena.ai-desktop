@@ -76,6 +76,40 @@ def _synced_stamp(session, merged, remote_messages):
     return history_sync.last_activity(session)
 
 
+@app.route("/api/chats/<chat_id>/sync-project", methods=["POST"])
+def api_chat_sync_project(chat_id):
+    """Pull the finished Code project of a linked chat into its folder (files, images it can still reach, link)."""
+    if not _validate_chat_id(chat_id):
+        return jsonify({"error": "Invalid chat id", "code": "bad_request"}), 400
+    data = _load_chat(chat_id)
+    if not data or not data.get("eval_id"):
+        return jsonify({"error": "This chat is not linked to an arena.ai Code conversation.", "code": "unlinked"}), 422
+    folder = data.get("workspace") or (str(_chosen_ws()) if _chosen_ws() else "")
+    if not folder:
+        return jsonify({"error": "Choose a project folder first.", "code": "no_folder"}), 400
+    _tl.workspace = Path(folder)
+    _tl.auto_allow = True
+    conv = {"chat_id": chat_id, "title": data.get("title") or "project", "mode": data.get("mode") or "direct",
+            "modality": "webdev", "eval_id": data["eval_id"], "last_arena_ids": {}, "new": False}
+    notes, written = [], 0
+    try:
+        for raw in _sync_from_manifest(conv):
+            line = raw if isinstance(raw, str) else str(raw)
+            payload = json.loads(line.split("data: ", 1)[1]) if "data: " in line else {}
+            if payload.get("type") == "notice":
+                notes.append(payload.get("text"))
+            elif payload.get("type") == "files_written":
+                written += int(payload.get("written") or 0)
+        if os.path.isfile(os.path.join(folder, "package.json")) and not os.path.isdir(os.path.join(folder, "node_modules")):
+            ok, tail = sandbox_sync.run_npm_install(Path(folder), [])
+            notes.append("Packages installed." if ok else f"npm install failed: {tail}")
+    finally:
+        _tl.auto_allow = False
+        _tl.workspace = None
+    return jsonify({"ok": True, "written": written, "notes": notes, "folder": folder,
+                    "images_missing": sorted((conv.get("_bin_fail") or {}).keys())})
+
+
 @app.route("/api/chats/<chat_id>/refresh", methods=["POST"])
 def api_chat_refresh(chat_id):
     """Pull later arena.ai turns into an already-linked local chat.

@@ -16,7 +16,14 @@ import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-PROJECTS_DIR = Path(os.environ.get("ARENA_PROJECTS_DIR") or (Path.home() / "ArenaProjects"))
+def _default_projects_dir() -> Path:
+    legacy = Path.home() / "ArenaProjects"
+    if legacy.is_dir():
+        return legacy  # keep working where earlier versions already put projects
+    return Path.home() / "Documents" / "Arena Desktop"
+
+
+PROJECTS_DIR = Path(os.environ.get("ARENA_PROJECTS_DIR") or _default_projects_dir())
 MANIFEST = ".arena-files.json"
 _SKIP = {".git", "node_modules", "__pycache__"}
 

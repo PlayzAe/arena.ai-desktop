@@ -224,6 +224,8 @@
       if ('enabled' in body) demoStore.memoryEnabled = Boolean(body.enabled);
       return { ok: true, enabled: demoStore.memoryEnabled !== false, demo: true };
     },
+    async getPulse() { return { ok: false }; },
+    async syncProject() { return { ok: false }; },
     async updateDownload() { return { ok: false, error: 'Updates are disabled in demo mode.', demo: true }; },
     async updateStatus() { return { state: 'idle', demo: true }; },
     async updateApply() { return { ok: false, demo: true }; },

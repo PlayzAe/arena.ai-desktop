@@ -830,7 +830,8 @@
       if (activity.kind === 'sandbox' && (raw.verb === 'Edited' || raw.verb === 'Created' || raw.verb === 'Deleted') && raw.path) {
         const diffCard = renderDiffCard(activity);
         const ext = (raw.path || '').split('.').pop().toLowerCase();
-        if ((raw.verb === 'Created' || raw.verb === 'Edited') && ['html', 'htm'].includes(ext) && !raw.error) {
+        if ((raw.verb === 'Created' || raw.verb === 'Edited') && ['html', 'htm'].includes(ext) && !raw.error
+            && state.modality !== 'webdev' && state.modality !== 'code') {
           const preview = renderFilePreview(raw.path);
           if (preview) {
             const wrapper = el('div', { class: 'sandbox-file-group' });
@@ -901,8 +902,12 @@
       seen.add(id);
       return true;
     });
-    const previews = unique.filter((a) => a.url && /^(https?:)?\//.test(a.url));
-    const files = unique.filter((a) => !previews.includes(a));
+    const isLocalUrl = (a) => { try { return new URL(a.url, window.location.origin).origin === window.location.origin; } catch { return false; } };
+    let previews = unique.filter((a) => a.url && /^(https?:)?\//.test(a.url));
+    if (state.modality === 'webdev' || state.modality === 'code' || previews.some((a) => !isLocalUrl(a))) {
+      previews = previews.filter((a) => !isLocalUrl(a));
+    }
+    const files = unique.filter((a) => !previews.includes(a) && !(a.url && isLocalUrl(a) && a.kind === 'preview'));
     const wrap = el('div', { class: 'artifact-stack' });
     previews.slice(0, 3).forEach((a) => wrap.appendChild(renderSitePreviewCard(a)));
     if (files.length) {

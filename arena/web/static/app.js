@@ -614,6 +614,8 @@
     diagnostics() { return this.request('/api/diagnostics'); },
     diagnosticsRun() { return this.request('/api/diagnostics/run'); },
     getUsage() { return this.request('/api/usage'); },
+    getPulse() { return this.request('/api/usage/pulse'); },
+    syncProject(chatId) { return this.request(`/api/chats/${encodeURIComponent(chatId)}/sync-project`, { method: 'POST', body: {} }); },
     getGateway() { return this.request('/api/gateway'); },
     startGateway() { return this.request('/api/gateway/start', { method: 'POST', body: {} }); },
     stopGateway() { return this.request('/api/gateway/stop', { method: 'POST', body: {} }); },
@@ -1338,6 +1340,8 @@
       if ('enabled' in body) demoStore.memoryEnabled = Boolean(body.enabled);
       return { ok: true, enabled: demoStore.memoryEnabled !== false, demo: true };
     },
+    async getPulse() { return { ok: false }; },
+    async syncProject() { return { ok: false }; },
     async updateDownload() { return { ok: false, error: 'Updates are disabled in demo mode.', demo: true }; },
     async updateStatus() { return { state: 'idle', demo: true }; },
     async updateApply() { return { ok: false, demo: true }; },
@@ -2919,6 +2923,10 @@ You can start with a more structured option: one script, short captions, and a c
       state.permissionCount = status.pending_permissions;
       if (status.workspace) state.workspace = status.workspace;
       state.workspaceChosen = Boolean(status.workspace_chosen);
+      if (status.workspace_missing && !state.missingFolderShown) {
+        state.missingFolderShown = true;
+        toast('The folder you chose no longer exists. Pick another one with the folder button above the message box.', 'warning', 'Folder not found');
+      } else if (!status.workspace_missing) { state.missingFolderShown = false; }
       if (status.app_version) {
         state.appVersion = status.app_version;
         const versionNode = document.querySelector('.status-desktop');
@@ -2954,6 +2962,8 @@ You can start with a more structured option: one script, short captions, and a c
       if (initial) {
         applyStartModeParam();
         checkForUpdatesOnce();
+        void refreshPulse();
+        setInterval(() => { if (!document.hidden) void refreshPulse(); }, 60000);
         showWhatsNewOnce();
       }
       if (!initial && (oldMode !== state.mode || oldModality !== state.modality)) loadModels(state.modality, { quiet: true });
@@ -4254,7 +4264,8 @@ You can start with a more structured option: one script, short captions, and a c
       if (activity.kind === 'sandbox' && (raw.verb === 'Edited' || raw.verb === 'Created' || raw.verb === 'Deleted') && raw.path) {
         const diffCard = renderDiffCard(activity);
         const ext = (raw.path || '').split('.').pop().toLowerCase();
-        if ((raw.verb === 'Created' || raw.verb === 'Edited') && ['html', 'htm'].includes(ext) && !raw.error) {
+        if ((raw.verb === 'Created' || raw.verb === 'Edited') && ['html', 'htm'].includes(ext) && !raw.error
+            && state.modality !== 'webdev' && state.modality !== 'code') {
           const preview = renderFilePreview(raw.path);
           if (preview) {
             const wrapper = el('div', { class: 'sandbox-file-group' });
@@ -4325,8 +4336,12 @@ You can start with a more structured option: one script, short captions, and a c
       seen.add(id);
       return true;
     });
-    const previews = unique.filter((a) => a.url && /^(https?:)?\//.test(a.url));
-    const files = unique.filter((a) => !previews.includes(a));
+    const isLocalUrl = (a) => { try { return new URL(a.url, window.location.origin).origin === window.location.origin; } catch { return false; } };
+    let previews = unique.filter((a) => a.url && /^(https?:)?\//.test(a.url));
+    if (state.modality === 'webdev' || state.modality === 'code' || previews.some((a) => !isLocalUrl(a))) {
+      previews = previews.filter((a) => !isLocalUrl(a));
+    }
+    const files = unique.filter((a) => !previews.includes(a) && !(a.url && isLocalUrl(a) && a.kind === 'preview'));
     const wrap = el('div', { class: 'artifact-stack' });
     previews.slice(0, 3).forEach((a) => wrap.appendChild(renderSitePreviewCard(a)));
     if (files.length) {
@@ -5294,47 +5309,53 @@ You can start with a more structured option: one script, short captions, and a c
     } catch { /* decorative hint */ }
   }
 
+  function clockText(epoch) {
+    return new Date(epoch * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  }
+
+  async function refreshPulse() {
+    if (state.demo || !state.authenticated) return;
+    try {
+      const p = await API.getPulse();
+      if (p && p.ok) state.pulse = p;
+    } catch { /* keep the last reading */ }
+    renderUsageBar();
+    const p = state.pulse;
+    if (p && p.left <= 0 && !state.limitToastShown) {
+      state.limitToastShown = true;
+      toast(`Arena's daily credits are used up.${p.reset ? ` They refresh at ${clockText(p.reset)}.` : ''} Replies stop until then.`, 'warning', 'Daily limit reached');
+    }
+    if (p && p.left > 0) state.limitToastShown = false;
+  }
+
+  // Arena's own meter (/api/me/pulse): the percent of today's credits left. Nothing here is estimated.
   function renderUsageBar() {
     if (!els.usageBarWrap || !els.usageBarFill || !els.usageBarLabel) return;
-    const remaining = state.usageRemaining;
-    const reset = state.usageReset;
-    const sends = state.usageSendsToday || 0;
-    if (remaining == null && sends === 0) {
+    const p = state.pulse;
+    if (!p || state.demo) {
       els.usageBarWrap.hidden = true;
       return;
     }
     els.usageBarWrap.hidden = false;
-    let pct = 0;
-    let label = '';
-    if (remaining != null && remaining >= 0) {
-      // ratelimit-remaining from arena.ai: treat as requests left out of an
-      // estimated daily pool. Arena typically allows ~50 per modality window,
-      // but the daily pool is larger. Use remaining directly for the bar.
-      // Lower remaining = more used.
-      const estimated_total = Math.max(remaining + sends, sends, 50);
-      const used = estimated_total - remaining;
-      pct = Math.min(100, Math.round((used / estimated_total) * 100));
-      label = `${pct}% of daily usage used`;
-      if (remaining <= 5) label += ' — running low';
+    const used = Math.max(0, Math.min(100, 100 - p.left));
+    let label;
+    if (p.left <= 0) {
+      label = `Daily limit reached${p.reset ? ` \u2014 credits refresh at ${clockText(p.reset)}` : ''}`;
     } else {
-      // No server-side remaining; fall back to local send count.
-      pct = Math.min(100, Math.round((sends / 50) * 100));
-      label = `${sends} sends today`;
-    }
-    if (reset) {
-      const resetDate = new Date(reset * 1000);
-      const now = Date.now();
-      if (resetDate.getTime() > now) {
-        const diff = resetDate.getTime() - now;
-        const hours = Math.floor(diff / 3600000);
-        const mins = Math.floor((diff % 3600000) / 60000);
-        if (hours > 0) label += `, resets in ${hours}h ${mins}m`;
-        else if (mins > 0) label += `, resets in ${mins}m`;
+      label = `${p.left}% of today's credits left`;
+      if (p.left <= 15) label += ' \u2014 running low';
+      if (p.reset) {
+        const diff = p.reset * 1000 - Date.now();
+        if (diff > 0) {
+          const h = Math.floor(diff / 3600000);
+          const m = Math.floor((diff % 3600000) / 60000);
+          label += h > 0 ? `, refresh in ${h}h ${m}m` : `, refresh in ${m}m`;
+        }
       }
     }
-    els.usageBarFill.style.width = pct + '%';
-    els.usageBarFill.classList.toggle('warn', pct >= 70 && pct < 90);
-    els.usageBarFill.classList.toggle('danger', pct >= 90);
+    els.usageBarFill.style.width = `${used}%`;
+    els.usageBarFill.classList.toggle('warn', used >= 70 && used < 90);
+    els.usageBarFill.classList.toggle('danger', used >= 90);
     els.usageBarLabel.textContent = label;
   }
 
@@ -7309,6 +7330,7 @@ You can start with a more structured option: one script, short captions, and a c
       return;
     }
     if (type === 'usage') {
+      void refreshPulse();
       if (event.remaining != null) state.usageRemaining = Number(event.remaining);
       if (event.reset != null) state.usageReset = Number(event.reset);
       if (event.modality) state.usageModality = String(event.modality);

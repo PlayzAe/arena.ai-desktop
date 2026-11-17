@@ -541,47 +541,53 @@
     } catch { /* decorative hint */ }
   }
 
+  function clockText(epoch) {
+    return new Date(epoch * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  }
+
+  async function refreshPulse() {
+    if (state.demo || !state.authenticated) return;
+    try {
+      const p = await API.getPulse();
+      if (p && p.ok) state.pulse = p;
+    } catch { /* keep the last reading */ }
+    renderUsageBar();
+    const p = state.pulse;
+    if (p && p.left <= 0 && !state.limitToastShown) {
+      state.limitToastShown = true;
+      toast(`Arena's daily credits are used up.${p.reset ? ` They refresh at ${clockText(p.reset)}.` : ''} Replies stop until then.`, 'warning', 'Daily limit reached');
+    }
+    if (p && p.left > 0) state.limitToastShown = false;
+  }
+
+  // Arena's own meter (/api/me/pulse): the percent of today's credits left. Nothing here is estimated.
   function renderUsageBar() {
     if (!els.usageBarWrap || !els.usageBarFill || !els.usageBarLabel) return;
-    const remaining = state.usageRemaining;
-    const reset = state.usageReset;
-    const sends = state.usageSendsToday || 0;
-    if (remaining == null && sends === 0) {
+    const p = state.pulse;
+    if (!p || state.demo) {
       els.usageBarWrap.hidden = true;
       return;
     }
     els.usageBarWrap.hidden = false;
-    let pct = 0;
-    let label = '';
-    if (remaining != null && remaining >= 0) {
-      // ratelimit-remaining from arena.ai: treat as requests left out of an
-      // estimated daily pool. Arena typically allows ~50 per modality window,
-      // but the daily pool is larger. Use remaining directly for the bar.
-      // Lower remaining = more used.
-      const estimated_total = Math.max(remaining + sends, sends, 50);
-      const used = estimated_total - remaining;
-      pct = Math.min(100, Math.round((used / estimated_total) * 100));
-      label = `${pct}% of daily usage used`;
-      if (remaining <= 5) label += ' — running low';
+    const used = Math.max(0, Math.min(100, 100 - p.left));
+    let label;
+    if (p.left <= 0) {
+      label = `Daily limit reached${p.reset ? ` \u2014 credits refresh at ${clockText(p.reset)}` : ''}`;
     } else {
-      // No server-side remaining; fall back to local send count.
-      pct = Math.min(100, Math.round((sends / 50) * 100));
-      label = `${sends} sends today`;
-    }
-    if (reset) {
-      const resetDate = new Date(reset * 1000);
-      const now = Date.now();
-      if (resetDate.getTime() > now) {
-        const diff = resetDate.getTime() - now;
-        const hours = Math.floor(diff / 3600000);
-        const mins = Math.floor((diff % 3600000) / 60000);
-        if (hours > 0) label += `, resets in ${hours}h ${mins}m`;
-        else if (mins > 0) label += `, resets in ${mins}m`;
+      label = `${p.left}% of today's credits left`;
+      if (p.left <= 15) label += ' \u2014 running low';
+      if (p.reset) {
+        const diff = p.reset * 1000 - Date.now();
+        if (diff > 0) {
+          const h = Math.floor(diff / 3600000);
+          const m = Math.floor((diff % 3600000) / 60000);
+          label += h > 0 ? `, refresh in ${h}h ${m}m` : `, refresh in ${m}m`;
+        }
       }
     }
-    els.usageBarFill.style.width = pct + '%';
-    els.usageBarFill.classList.toggle('warn', pct >= 70 && pct < 90);
-    els.usageBarFill.classList.toggle('danger', pct >= 90);
+    els.usageBarFill.style.width = `${used}%`;
+    els.usageBarFill.classList.toggle('warn', used >= 70 && used < 90);
+    els.usageBarFill.classList.toggle('danger', used >= 90);
     els.usageBarLabel.textContent = label;
   }
 

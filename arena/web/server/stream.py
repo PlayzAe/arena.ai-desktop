@@ -448,6 +448,8 @@ def _permit(mode: str, tool: str, info: dict):
     """Apply the permission mode to one action, asking the user when needed.
     Yields SSE events; returns "allow", "deny" (the user said no) or "blocked" (the mode forbids it)."""
     verdict = BROKER.check(mode, tool, info.get("inside", True), info.get("command", ""))
+    if verdict == "ask" and getattr(_tl, "auto_allow", False):
+        return "allow"  # the user pressed Sync themselves
     if verdict == "allow":
         return "allow"
     if verdict == "deny":
@@ -595,6 +597,7 @@ def _poll_webdev_preview(client, conv: dict):
         url = contracts.find_preview_url(body)
         if url:
             conv["_preview_sent"] = True
+            conv.setdefault("previews", set()).add(url)
             yield _sse({"type": "preview", "model": "a", "url": url,
                         "status": "ready", "message": "Preview ready"})
             return
@@ -776,7 +779,7 @@ def _sandbox_call(lane: str, call: dict, conv: dict):
     fpath = op.get("path") or ""
     is_present = "present" in str(op["tool"]).lower()
     is_html_write = row.get("verb") in ("Created", "Edited") and fpath.lower().rsplit(".", 1)[-1] in ("html", "htm")
-    if (is_present or is_html_write) and fpath and not row.get("error"):
+    if (is_present or (is_html_write and conv.get("modality") != "webdev")) and fpath and not row.get("error"):
         yield _sse({"type": "file_preview", "model": lane, "path": fpath,
                      "html": fpath.lower().rsplit(".", 1)[-1] in ("html", "htm")})
 
@@ -816,6 +819,14 @@ def _sandbox_result(lane: str, res: dict, conv: dict):
             if text:
                 row["output"] = text
     yield _sse({"type": "sandbox_done", "model": lane, "id": rid, "ok": not bad, "output": text})
+    ent = (conv.get("sb_ops") or {}).get(rid)
+    if ent and not bad and ent["op"].get("kind") == "touch" and sandbox_sync.is_binary_path(ent["op"].get("path") or ""):
+        # Fetch generated images now, while the sandbox still serves them (it stops once Arena deploys).
+        try:
+            yield from _save_remote_binary(conv, ent["lane"], str(ent["op"]["path"]).replace("\\", "/").lstrip("./"),
+                                           attempts=3, wait=2)
+        except Exception:  # noqa: BLE001 - the image is fetched again when the turn ends
+            LOG.exception("early image download failed")
     url = contracts.find_preview_url(out)
     if url and url not in conv.setdefault("previews", set()):
         conv["previews"].add(url)
@@ -834,14 +845,14 @@ def _finish_sandbox(conv: dict):
     """After a code turn, copy what only exists on Arena's sandbox onto this computer: generated images,
     bash cp/mv/mkdir results, and the npm packages (installed here, not just on Arena's server)."""
     entries = list((conv.get("sb_ops") or {}).values())
-    if not entries:
+    if not entries and not conv.get("_needs_npm"):
         return
     done_ids = {r.get("id") for r in conv.get("sandbox", []) if r.get("ok") is True}
     ids = conv.get("last_arena_ids") or {}
-    for lane in sorted({e["lane"] for e in entries}):
+    for lane in sorted({e["lane"] for e in entries}) or ["a"]:
         ops = [e["op"] for e in entries if e["lane"] == lane and e["op"].get("id") in done_ids]
         root = _code_root(conv["chat_id"], conv["title"], lane, conv["mode"])
-        if not ops or not (yield from _mirror_allowed(conv, root, lane)):
+        if not (ops or conv.get("_needs_npm")) or not (yield from _mirror_allowed(conv, root, lane)):
             continue
         man = _sync_load(root)
         saved, failed = 0, []
@@ -859,30 +870,14 @@ def _finish_sandbox(conv: dict):
             if op["kind"] != "touch" or not sandbox_sync.is_binary_path(op.get("path") or ""):
                 continue
             rel = str(op["path"]).replace("\\", "/").lstrip("./")
-            url = sandbox_sync.preview_url(ids.get(lane), rel)
-            if not url:
-                failed.append(f"{rel} (only files under public/ can be downloaded; ask the AI to save images in public/images/)")
+            if rel in conv.get("_bin_saved", set()):
+                saved += 1
                 continue
-            data, why = None, ""
-            for _ in range(6):
-                try:
-                    r = _media_get(url, timeout=60)
-                    if r.status_code == 200 and r.content:
-                        data = r.content
-                        break
-                    why = f"HTTP {r.status_code}"
-                except (requests.RequestException, ValueError) as e:
-                    why = str(e)[:80]
-                yield from _wait_for(lambda: False, 4)
-            try:
-                if data is None:
-                    failed.append(f"{rel} ({why})")
-                elif keep(rel, data):
-                    saved += 1
-                else:
-                    failed.append(f"{rel} (a different file is already there)")
-            except (OSError, ValueError) as e:
-                failed.append(f"{rel} ({e})")
+            if (yield from _save_remote_binary(conv, lane, rel, attempts=2, wait=3)):
+                saved += 1
+            else:
+                failed.append(f"{rel} ({(conv.get('_bin_fail') or {}).get(rel, 'not available')})")
+        man = _sync_load(root)
         for op in ops:
             if op["kind"] == "run" and op.get("command"):
                 for res in sandbox_sync.replay_fs(root, op["command"]):
@@ -935,6 +930,119 @@ def _finish_sandbox(conv: dict):
             yield _sse({"type": "notice", "text": f"Packages installed in {root}. Run `npm run dev` there to start the site."})
         else:
             yield _sse({"type": "notice", "level": "warn", "text": f"npm install failed in {root}: {tail}"})
+
+
+def _save_remote_binary(conv: dict, lane: str, rel: str, attempts: int = 1, wait: int = 0):
+    """Download one public/ file from the sandbox preview host into the project folder.
+
+    Only works while the sandbox still serves it: once Arena deploys, the host answers 404 for images.
+    Generator; returns True when the file is on disk, else False with the reason in conv["_bin_fail"]."""
+    root = _code_root(conv["chat_id"], conv["title"], lane, conv["mode"])
+    done = conv.setdefault("_bin_saved", set())
+    if rel in done:
+        return True
+    if not (yield from _mirror_allowed(conv, root, lane)):
+        return False
+    fails = conv.setdefault("_bin_fail", {})
+    url = sandbox_sync.preview_url((conv.get("last_arena_ids") or {}).get(lane), rel)
+    if not url:
+        fails[rel] = "only files under public/ can be downloaded"
+        return False
+    data, why = None, "not available"
+    for attempt in range(max(1, attempts)):
+        try:
+            r = _media_get(url, timeout=40)
+            if r.status_code == 200 and r.content:
+                data = r.content
+                break
+            why = f"HTTP {r.status_code}"
+        except (requests.RequestException, ValueError) as e:
+            why = str(e)[:80]
+        if attempt < attempts - 1:
+            yield from _wait_for(lambda: False, wait)
+    if data is None:
+        fails[rel] = why
+        return False
+    try:
+        man = _sync_load(root)
+        target = sandbox_sync.inside(root, rel)
+        if target.is_file() and (rel not in man or _digest(target.read_bytes()) != man[rel]) \
+                and _digest(target.read_bytes()) != _digest(data):
+            fails[rel] = "a different file is already there"
+            return False
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        man[rel] = _digest(data)
+        _sync_save(root, man)
+    except (OSError, ValueError) as e:
+        fails[rel] = str(e)[:80]
+        return False
+    done.add(rel)
+    fails.pop(rel, None)
+    return True
+
+
+def _last_assistant_id(eval_id) -> Optional[str]:
+    data, err, _status = _arena_get_json(
+        contracts.PATHS["evaluation"].format(eval_id=urllib.parse.quote(str(eval_id))), timeout=30)
+    if err or not isinstance(data, dict):
+        return None
+    msgs = [m for m in (data.get("messages") or []) if isinstance(m, dict)
+            and str(m.get("role") or "").lower() == "assistant"
+            and str(m.get("participantPosition") or "a").lower() != "b"]
+    msgs.sort(key=lambda m: str(m.get("createdAt") or ""))
+    return str(msgs[-1].get("id")) if msgs else None
+
+
+def _sync_from_manifest(conv: dict, lane: str = "a"):
+    """Best effort: a failure here never ends or loses the turn."""
+    try:
+        yield from _sync_from_manifest_inner(conv, lane)
+    except Exception:  # noqa: BLE001
+        LOG.exception("project sync failed")
+
+
+def _sync_from_manifest_inner(conv: dict, lane: str = "a"):
+    """After a Code turn, make the local folder match Arena's finished project.
+
+    GET /api/evaluation/webdev/<assistant message id> returns the whole project: every text file with its
+    final content, the names of generated images, and the live site link. This repairs anything a dropped
+    stream, a late event or an edit made after the stream missed."""
+    eval_id = conv.get("eval_id")
+    if not eval_id or conv.get("mode") in ("battle", "side-by-side"):
+        return
+    mid = _last_assistant_id(eval_id) or (conv.get("last_arena_ids") or {}).get(lane)
+    if not mid:
+        return
+    data, err, _status = _arena_get_json(
+        contracts.PATHS["webdev"].format(message_id=urllib.parse.quote(str(mid))), timeout=45)
+    if err or not isinstance(data, dict):
+        return
+    conv.setdefault("last_arena_ids", {})[lane] = mid
+    url = contracts.find_preview_url(data)
+    previews = conv.setdefault("previews", set())
+    if url and url not in previews:
+        previews.add(url)
+        conv["_preview_sent"] = True
+        yield _sse({"type": "preview", "model": lane, "url": url, "status": "ready", "message": "Final site"})
+    manifest = data.get("manifest") if isinstance(data.get("manifest"), dict) else {}
+    files = [f for f in (manifest.get("files") or []) if isinstance(f, dict) and isinstance(f.get("content"), str)]
+    if files:
+        yield from _save_webdev(lane, files, conv, template=True)
+        conv["_needs_npm"] = True
+    missing = []
+    for b in manifest.get("binaryFiles") or []:
+        rel = str((b or {}).get("path") or "").replace("\\", "/").lstrip("./")
+        if rel and rel not in conv.get("_bin_saved", set()):
+            ok = yield from _save_remote_binary(conv, lane, rel)
+            if not ok:
+                missing.append(rel)
+    if missing:
+        yield _sse({"type": "notice", "level": "warn",
+                    "text": "Arena only serves generated images while it builds, and it had already deployed: "
+                            f"{len(missing)} image(s) could not be downloaded ({', '.join(missing[:4])}"
+                            f"{' ...' if len(missing) > 4 else ''}). Send the prompt again in a new chat to "
+                            "get them, or save them from the Arena window."})
 
 
 def _local_edits(root: Path):

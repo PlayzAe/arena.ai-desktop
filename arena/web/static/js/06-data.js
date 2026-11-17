@@ -207,6 +207,10 @@
       state.permissionCount = status.pending_permissions;
       if (status.workspace) state.workspace = status.workspace;
       state.workspaceChosen = Boolean(status.workspace_chosen);
+      if (status.workspace_missing && !state.missingFolderShown) {
+        state.missingFolderShown = true;
+        toast('The folder you chose no longer exists. Pick another one with the folder button above the message box.', 'warning', 'Folder not found');
+      } else if (!status.workspace_missing) { state.missingFolderShown = false; }
       if (status.app_version) {
         state.appVersion = status.app_version;
         const versionNode = document.querySelector('.status-desktop');
@@ -242,6 +246,8 @@
       if (initial) {
         applyStartModeParam();
         checkForUpdatesOnce();
+        void refreshPulse();
+        setInterval(() => { if (!document.hidden) void refreshPulse(); }, 60000);
         showWhatsNewOnce();
       }
       if (!initial && (oldMode !== state.mode || oldModality !== state.modality)) loadModels(state.modality, { quiet: true });

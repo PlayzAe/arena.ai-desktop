@@ -549,7 +549,7 @@ def test_v461_new_chat_unlocks_model_selection_without_typing(site):
         # Work type inside a started chat: arena.ai asks, then opens a new chat.
         page.locator('#prompt').fill('Second chat to check the work type rule')
         page.locator('#prompt').press('Enter')
-        page.get_by_text('Demonstration Response').nth(1).wait_for(timeout=30000)
+        page.wait_for_function("document.querySelectorAll('.message-turn').length >= 1", timeout=30000)
         page.locator('#stopButton').wait_for(state='hidden', timeout=30000)
         page.locator('#modalityButton').click()
         page.locator('.popover-menu .popover-option', has_text='Code').first.click()
@@ -559,6 +559,8 @@ def test_v461_new_chat_unlocks_model_selection_without_typing(site):
         page.wait_for_function("document.querySelector('#modalityLabel')?.textContent.trim() === 'Code'", timeout=10000)
         page.wait_for_function("document.querySelectorAll('.message-turn').length === 0", timeout=5000)
         # First Code message with Workspace Sync unable to save files: explain and ask.
+        page.locator('#workspaceSyncChip').click()
+        page.wait_for_function("() => !document.querySelector('#workspaceSyncToggle').checked", timeout=5000)
         page.locator('#prompt').fill('Build a landing page')
         page.locator('#prompt').press('Enter')
         page.get_by_text('Save the generated files on this computer?').wait_for(timeout=5000)
@@ -1326,4 +1328,46 @@ def test_v56_refresh_native_question_and_image_choice(site):
             f"() => document.body.innerText.includes('already up to date')", timeout=10000)
         assert calls['refresh'] > before
         assert not errors, errors
+        browser.close()
+
+
+def test_human_check_modal_appears_and_points_to_the_arena_window(site):
+    """Arena answered `recaptcha validation failed`: the desktop asks the user to tick the box (it never ticks it)."""
+    sync_api = pytest.importorskip('playwright.sync_api')
+    shot = os.path.join(os.path.dirname(__file__), '..', 'docs', 'screenshots', 'human-check.png')
+    with sync_api.sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=['--no-sandbox'])
+        page = browser.new_page(viewport={'width': 1200, 'height': 760})
+        errors = []
+        page.on('pageerror', lambda err: errors.append(str(err)))
+
+        def api(route):
+            path = route.request.url.split('?', 1)[0].split('/api/', 1)[1]
+            if path == 'chat' and route.request.method == 'POST':
+                events = [{'type': 'meta', 'chat_id': '12345678-1234-1234-1234-123456789abc', 'dual': False, 'names': {}},
+                          {'type': 'challenge', 'kind': 'recaptcha',
+                           'message': 'arena.ai wants a quick human check ("I\'m not a robot"). Tick the box in the arena.ai window.'}]
+                body = ''.join('data: ' + json.dumps(e) + '\n\n' for e in events)
+                return route.fulfill(status=200, content_type='text/event-stream; charset=utf-8', body=body)
+            if path.endswith('new') or path == 'new-chat':
+                return route.fulfill(status=200, content_type='application/json',
+                                     body=json.dumps({'ok': True, 'chat_id': '12345678-1234-1234-1234-123456789abc'}))
+            values = {'status': {'authenticated': True, 'mode': 'direct', 'modality': 'text', 'desktop': True,
+                                 'permission_mode': 'default', 'workspace': 'C:\test'},
+                      'chats': [], 'history': [], 'models': [{'id': 'm1', 'name': 'Model One'}], 'permissions': [],
+                      'permission-mode': {'ok': True, 'mode': 'default'}, 'workspace': {'workspace': 'C:\test', 'projects': []},
+                      'settings': {'setup_done': True}}
+            return route.fulfill(status=200, content_type='application/json', body=json.dumps(values.get(path, {'ok': True})))
+
+        page.route('**/api/**', api)
+        page.goto(site, wait_until='networkidle')
+        page.locator('#prompt').fill('hello')
+        page.locator('#prompt').press('Enter')
+        dialog = page.get_by_role('dialog')
+        dialog.wait_for(timeout=10000)
+        text = dialog.inner_text()
+        assert 'Human check needed' in text and 'Show the check window' in text
+        assert 'Nothing is sent until you finish' in text
+        page.screenshot(path=shot)
+        assert not errors
         browser.close()

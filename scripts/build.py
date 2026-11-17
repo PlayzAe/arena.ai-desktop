@@ -66,7 +66,15 @@ def main() -> None:
         run(sys.executable, "scripts/build-js.py")
         run(sys.executable, "-m", "PyInstaller", "arena-cli.spec", "--noconfirm", "--distpath", "dist", "--workpath", "build/app")
     app = ROOT / "dist" / "Arena-Desktop.exe"
+    common = ["--noconfirm", "--onefile", "--noconsole", "--icon", str(ROOT / "assets" / "arena-cli.ico"),
+              "--version-file", str(ROOT / "build" / "version_info.txt"),
+              "--add-data", f"{ROOT / 'build' / 'version.txt'};.", "--add-data", f"{ROOT / 'assets' / 'arena-cli.ico'};.",
+              "--add-data", f"{ROOT / 'installer' / 'ui.html'};.",
+              "--collect-all", "webview", "--hidden-import", "webview.platforms.edgechromium", "--distpath", "dist"]
+    run(sys.executable, "-m", "PyInstaller", str(ROOT / "installer" / "setup.py"), "--name", "Uninstall-Arena-Desktop", *common,
+        "--workpath", "build/uninstall", "--specpath", "build/uninstall")
     run(sys.executable, "-m", "PyInstaller", str(ROOT / "installer" / "setup.py"), "--noconfirm", "--onefile", "--noconsole",
+        "--add-data", f"{ROOT / 'dist' / 'Uninstall-Arena-Desktop.exe'};.",
         "--name", "Arena-Desktop-Setup", "--icon", str(ROOT / "assets" / "arena-cli.ico"),
         "--version-file", str(ROOT / "build" / "version_info.txt"),
         "--add-data", f"{app};.", "--add-data", f"{ROOT / 'build' / 'version.txt'};.",
