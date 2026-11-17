@@ -523,10 +523,42 @@
         return;
       }
       const shown = content.length > 250000 ? `${content.slice(0, 250000)}\n\n… [preview truncated]` : content;
+      const editAction = {
+        label: 'Edit', variant: 'quiet', icon: 'code',
+        onClick: async ({ body, close }) => {
+          const ta = el('textarea', { class: 'file-editor', spellcheck: 'false', rows: '18', 'aria-label': `Edit ${entry.name}` });
+          ta.value = content;
+          const saveBtn = el('button', { class: 'button', type: 'button' }, iconEl('check'), el('span', { text: 'Save' }));
+          const cancelBtn = el('button', { class: 'button button-quiet', type: 'button' }, el('span', { text: 'Cancel' }));
+          cancelBtn.addEventListener('click', () => close());
+          saveBtn.addEventListener('click', async () => {
+            saveBtn.disabled = true;
+            try {
+              await API.saveWorkspaceFile(entry.path, ta.value);
+              toast('Saved to disk.', 'success');
+              void refreshWorkspacePanel({ force: true });
+              scheduleChatProjectRefresh();
+              close();
+            } catch (error) {
+              saveBtn.disabled = false;
+              toast(errorMessage(error), 'error', 'Save failed');
+            }
+          });
+          clear(body);
+          body.append(
+            el('div', { class: 'note-box' }, iconEl('info'), el('span', { text: 'Saving writes this file on your computer in the workspace folder.' })),
+            ta,
+            el('div', { class: 'file-editor-actions' }, saveBtn, cancelBtn)
+          );
+          ta.focus();
+          return false;
+        }
+      };
       open([
-        el('div', { class: 'note-box' }, iconEl('info'), el('span', { text: 'Preview is read-only. To modify the file, open the folder in your editor.' })),
+        el('div', { class: 'note-box' }, iconEl('info'), el('span', { text: 'Preview shows the file as it is on disk. Use Edit to change it.' })),
         el('pre', { class: 'file-preview-pre', text: shown || '[empty file]' })
       ], [
+        editAction,
         {
           label: 'Copy', variant: 'quiet', icon: 'copy',
           onClick: async () => {

@@ -94,6 +94,7 @@
       if (event.mode) turn.mode = event.mode;
       if (event.modality) turn.modality = event.modality;
       if (event.chat_id && !state.activeChatId) state.activeChatId = String(event.chat_id);
+      void setupChatProject(String(event.chat_id || generation.chatId || ''), String(event.modality || turn.modality || ''));
       if (!generation._chatsReloaded) {
         // The backend has saved this chat by now (it does so before the
         // stream starts), so refresh the sidebar with the real entry.
@@ -343,6 +344,7 @@
       return;
     }
     if (type === 'sandbox' || type === 'sandbox_done') {
+      scheduleChatProjectRefresh();
       addActivity(turn, lane, {
         ...event,
         name: event.title ?? event.name ?? (event.status === 'done' ? "Sandbox completed" : "Sandbox"),
@@ -376,6 +378,7 @@
       return;
     }
     if (type === 'files_written' || type === 'files') {
+      scheduleChatProjectRefresh();
       const list = Array.isArray(event.files) ? event.files : Array.isArray(event.data) ? event.data : Array.isArray(event.paths) ? event.paths : [];
       list.forEach((file) => {
         const artifact = normalizeArtifact(file, 'file');
@@ -420,6 +423,7 @@
     if (type === 'notice') {
       const message = textValue(event.message ?? event.text ?? event.notice ?? event.data);
       if (message && !lane.notices.includes(message)) lane.notices.push(message);
+      scheduleChatProjectRefresh();
       scheduleChatRender();
       return;
     }

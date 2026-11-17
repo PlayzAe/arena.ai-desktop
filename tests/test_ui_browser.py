@@ -1371,3 +1371,70 @@ def test_human_check_modal_appears_and_points_to_the_arena_window(site):
         page.screenshot(path=shot)
         assert not errors
         browser.close()
+
+
+def test_code_project_tree_and_file_editor(site):
+    """Code-mode project panel: the tree of the chat's folder shows, a file opens
+    in the preview modal, and Edit -> Save writes it back through the API."""
+    sync_api = pytest.importorskip('playwright.sync_api')
+    with sync_api.sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=['--no-sandbox'])
+        page = browser.new_page(viewport={'width': 1300, 'height': 900})
+        errors = []
+        page.on('pageerror', lambda err: errors.append(str(err)))
+        chat_id = '12345678-1234-1234-1234-123456789abc'
+        chat = {
+            'id': chat_id, 'title': 'Bean', 'mode': 'direct', 'modality': 'code', 'model_a': 'm1',
+            'messages': [
+                {'role': 'user', 'text': 'Build a site'},
+                {'role': 'assistant', 'text': 'Done.',
+                 'tools': [{'lane': 'a', 'tool': 'write_file', 'summary': 'Created notes.txt', 'status': 'ok', 'ok': True}]},
+            ],
+        }
+        saved = []
+
+        def api(route):
+            path = route.request.url.split('?', 1)[0].split('/api/', 1)[1]
+            if path == 'workspace/file' and route.request.method == 'POST':
+                saved.append(route.request.post_data_json)
+                return route.fulfill(status=200, content_type='application/json', body=json.dumps({'ok': True}))
+            if path == 'workspace/file':
+                return route.fulfill(status=200, content_type='application/json', body=json.dumps(
+                    {'path': 'bean-1234/model-a/notes.txt', 'name': 'notes.txt', 'size': 12, 'content': 'hello v1'}))
+            if path == 'workspace/tree':
+                return route.fulfill(status=200, content_type='application/json', body=json.dumps(
+                    {'root': '.', 'path': 'bean-1234/model-a',
+                     'entries': [{'name': 'notes.txt', 'path': 'bean-1234/model-a/notes.txt', 'is_dir': False, 'size': 12}],
+                     'truncated': False}))
+            if path == f'chats/{chat_id}/project':
+                return route.fulfill(status=200, content_type='application/json', body=json.dumps(
+                    {'root': 'C:/proj', 'rel': 'bean-1234/model-a', 'name': 'model-a',
+                     'lane': 'a', 'mode': 'direct', 'modality': 'code'}))
+            values = {
+                'status': {'authenticated': True, 'mode': 'direct', 'modality': 'code', 'desktop': True,
+                           'permission_mode': 'default', 'workspace': 'C:\\test'},
+                'chats': [chat], 'chats/' + chat_id: chat, 'history': chat['messages'],
+                'models': [{'id': 'm1', 'name': 'Model One'}], 'permissions': [],
+                'permission-mode': {'ok': True, 'mode': 'default'},
+                'workspace': {'workspace': 'C:\\test', 'projects': []},
+                'settings': {'setup_done': True},
+            }
+            return route.fulfill(status=200, content_type='application/json', body=json.dumps(values.get(path, {'ok': True})))
+
+        page.route('**/api/**', api)
+        page.goto(site, wait_until='networkidle')
+        page.get_by_role('button', name='Open chat: Bean').click()
+        panel = page.locator('#chatProjectPanel')
+        panel.wait_for(state='visible', timeout=10000)
+        panel.get_by_text('notes.txt').wait_for(timeout=10000)
+        panel.get_by_text('notes.txt').click()
+        page.get_by_role('button', name='Edit').click()
+        editor = page.locator('.file-editor')
+        editor.wait_for(timeout=10000)
+        editor.fill('hello v2')
+        page.get_by_role('button', name='Save').click()
+        page.wait_for_timeout(800)
+        assert saved and saved[0].get('path') == 'bean-1234/model-a/notes.txt', f'editor save never arrived: {saved}'
+        assert saved[0].get('content') == 'hello v2'
+        assert not errors, errors
+        browser.close()

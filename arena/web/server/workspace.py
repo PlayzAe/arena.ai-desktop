@@ -434,6 +434,37 @@ def api_workspace_file():
     })
 
 
+@app.route("/api/workspace/file", methods=["POST"])
+def api_workspace_file_save():
+    """Save an edited text file from the workspace panel editor. The click is the approval."""
+    data = request.get_json(silent=True) or {}
+    rel = str(data.get("path") or "")
+    content = data.get("content")
+    if not rel or not isinstance(content, str):
+        return jsonify({"error": "Missing file path or content"}), 400
+    try:
+        raw = content.encode("utf-8")
+    except UnicodeEncodeError:
+        return jsonify({"error": "The file content is not valid text"}), 400
+    if len(raw) > 512 * 1024:
+        return jsonify({"error": "File is too large to edit here (512 KB limit)"}), 400
+    if b"\x00" in raw:
+        return jsonify({"error": "Binary files cannot be edited here"}), 415
+    try:
+        target, root = _workspace_panel_path(rel)
+    except PermissionError as e:
+        return jsonify({"error": str(e)}), 403
+    if target.is_dir():
+        return jsonify({"error": "That path is a folder"}), 400
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(raw)
+    except OSError as e:
+        return jsonify({"error": f"Could not save the file: {e}"}), 500
+    return jsonify({"ok": True, "path": target.relative_to(root).as_posix(),
+                    "name": target.name, "size": len(raw)})
+
+
 @app.route("/api/workspace/download")
 def api_workspace_download():
     # Raw bytes for drag-from-tree-into-composer: the client wraps them in

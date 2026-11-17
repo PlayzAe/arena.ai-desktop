@@ -51,6 +51,7 @@
 - **Generated images are fetched while the sandbox still serves them**, as soon as `generate_image` finishes. After Arena deploys, it answers 404 for `/images/...`; the app then tells you which images it could not get instead of failing silently.
 - **No more white "Local preview" box in Code mode.** The final `arena.site` link is kept per chat (it survives leaving and coming back). Arena forbids framing that site (`X-Frame-Options: SAMEORIGIN`), so **Preview** opens it in an app window and **Browser** in your browser.
 - **Usage meter shows Arena's real number.** It reads Arena's daily-credit meter (`/api/me/pulse`): "N% of today's credits left", when they refresh, and a "Daily limit reached" state. The old bar guessed a percentage and could show 82% on a fresh install.
+- **Project files panel and a file editor for Code dialogs.** Code chats now show a collapsible "Project files" tree of the chat's folder above the composer (it refreshes while the sandbox works), and any text file opens in the preview modal with an Edit/Save editor. Saves stay inside the chat's panel folder and are guarded against traversal, sensitive paths, binary content and oversized files.
 - **Missing folder:** if the chosen folder was deleted, you get a clear message to pick another one. New installs default to `Documents\Arena Desktop`.
 
 ### About Arena's new daily limit
