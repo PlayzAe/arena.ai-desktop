@@ -30,7 +30,7 @@ def test_existing_edits_channel_is_unchanged(tmp_path):
 
 def test_named_file_the_ai_never_wrote_is_sent(tmp_path):
     root = _root(tmp_path)
-    (root / "kimi-k3.txt").write_text("hello\nworld\n", encoding="utf-8")
+    (root / "kimi-k3.txt").write_bytes(b"hello\nworld\n")  # bytes: identical on every platform
     changed, note = web._local_edits(root, "fix kimi-k3.txt please")
     assert changed == ["kimi-k3.txt"]
     assert "--- kimi-k3.txt ---\nhello\nworld\n" in note

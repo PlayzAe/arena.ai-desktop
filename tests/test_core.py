@@ -1032,7 +1032,7 @@ def test_named_project_files_ride_the_message_even_on_the_first_send(web, tmp_pa
     appmod, c, cfg, use, sent = web
     cfg.update(permission_mode="acceptEdits", workspace_dir=str(tmp_path / "ws"))
     (tmp_path / "ws").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "ws" / "kimi-k3.txt").write_text("hello\nworld\n")
+    (tmp_path / "ws" / "kimi-k3.txt").write_bytes(b"hello\nworld\n")  # bytes: identical on every platform
     appmod._ui_mode, appmod._ui_modality = "direct", "code"
     use(FakeResp(['a0:"ok"']))
     events(c.post("/api/chat", json={"message": "fix kimi-k3.txt please", "model_id": "m1"}))
