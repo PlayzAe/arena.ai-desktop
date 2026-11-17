@@ -97,6 +97,7 @@ def _signed_download(monkeypatch, tmp_path, *, body, pubkey, sig_body, want_sha=
 
     monkeypatch.setattr(updater, "_open_stream", fake_open)
     monkeypatch.setattr(updater, "UPDATES_DIR", tmp_path / "up")
+    monkeypatch.setattr(updater.sys, "platform", "win32", raising=False)  # MZ bodies
     monkeypatch.setattr(updater, "_job", {})
     monkeypatch.setattr(updater, "RELEASE_PUBKEY", pubkey)
     dest = tmp_path / "up" / "new.exe"
@@ -140,6 +141,7 @@ def test_missing_signature_is_rejected_when_a_key_is_pinned(monkeypatch, tmp_pat
     monkeypatch.setattr(updater, "_job", {})
     monkeypatch.setattr(updater, "RELEASE_PUBKEY", _b64(pub))
     monkeypatch.setattr(updater, "UPDATES_DIR", tmp_path / "up")
+    monkeypatch.setattr(updater.sys, "platform", "win32", raising=False)
     monkeypatch.setattr(updater, "_open_stream", lambda url, timeout=0: _BytesStream(EXE))
     dest2 = tmp_path / "up" / "other.exe"
     updater._download("https://example.invalid/Arena-Desktop.exe", dest2, "", "9.9.9",
@@ -160,6 +162,6 @@ def test_release_info_exposes_the_signature_asset():
         {"name": "Arena-Desktop.exe", "browser_download_url": "https://x/a.exe", "digest": "sha256:ab"},
         {"name": "Arena-Desktop.exe.sig", "browser_download_url": "https://x/a.exe.sig"},
     ]}
-    info = updater.release_info(rel)
+    info = updater.release_info(rel, platform="win32")
     assert info["sig_url"] == "https://x/a.exe.sig"
-    assert updater.release_info({"assets": []})["sig_url"] is None
+    assert updater.release_info({"assets": []}, platform="win32")["sig_url"] is None

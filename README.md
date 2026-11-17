@@ -52,6 +52,7 @@
 - **No more white "Local preview" box in Code mode.** The final `arena.site` link is kept per chat (it survives leaving and coming back). Arena forbids framing that site (`X-Frame-Options: SAMEORIGIN`), so **Preview** opens it in an app window and **Browser** in your browser.
 - **Usage meter shows Arena's real number.** It reads Arena's daily-credit meter (`/api/me/pulse`): "N% of today's credits left", when they refresh, and a "Daily limit reached" state. The old bar guessed a percentage and could show 82% on a fresh install.
 - **Project files panel and a file editor for Code dialogs.** Code chats now show a collapsible "Project files" tree of the chat's folder above the composer (it refreshes while the sandbox works), and any text file opens in the preview modal with an Edit/Save editor. Saves stay inside the chat's panel folder and are guarded against traversal, sensitive paths, binary content and oversized files.
+- **One-click updates come to Linux and macOS.** The updater now picks the right release asset per platform (a one-file build or AppImage - never an installer or .dmg it could not swap in), checks the right executable header (PE/ELF/Mach-O), and replaces the binary with a POSIX swap helper that waits for the app to exit, installs atomically, records the version and relaunches - with the same failure marker as the Windows helper. Checksums and signatures from the previous step work on every platform.
 - **Updates can be signature-verified.** When the maintainer pins a release public key (docs/RELEASE_SIGNING.md), the updater requires a detached Ed25519 signature and refuses to install anything that does not verify - a compromised release channel cannot substitute the binary anymore. All updater and media downloads also use a pinned HTTPS transport: one DNS resolve, vetted against private/internal ranges, with the socket pinned to that exact address, so rebinding and redirect tricks cannot reach your network.
 - **The workspace tree keeps itself current.** Edits made outside the app (VS Code, builds, git) show up on their own: while the panel is open it polls a cheap folder-change stamp and reloads the tree - expanded folders included - only when something visible changed. Dependency and log folders never trigger refreshes.
 - **Missing folder:** if the chosen folder was deleted, you get a clear message to pick another one. New installs default to `Documents\Arena Desktop`.
@@ -325,7 +326,7 @@ Arena Desktop is Windows-only right now because it depends on WebView2. I want t
 
 An independent researcher already did a thorough code review and started building a separate Linux client (Wayland/KDE, Native Messaging + browser extension). Their security audit helped shape several of the v1.2.0-beta fixes. I don't have their contact info but want to publicly thank them for the work — if you're reading this, reach out so I can credit you properly.
 
-If you're interested in helping with a port, PRs are welcome. The architecture section above shows what needs to change.
+The updater is already cross-platform (download, verify and a swap helper per OS), so a port gets self-update for free. If you're interested in helping with a port, PRs are welcome. The architecture section above shows what needs to change.
 
 ## Limitations
 

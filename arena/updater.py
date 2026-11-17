@@ -70,36 +70,82 @@ def plain_notes(body: str, limit: int = 12) -> list:
     return out
 
 
-def pick_asset(release: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _platform_key(platform: Optional[str] = None) -> str:
+    platform = platform or sys.platform
+    return platform if platform in _ASSET_PREFERENCES else "win32" if platform == "win32" else "linux"
+
+
+# Self-update needs one file that can replace the running binary: a PyInstaller
+# one-file build or an AppImage. That is the release naming convention; a .dmg
+# or installer is deliberately not picked (nothing could install it in place).
+_ASSET_PREFERENCES = {
+    "win32": ("Arena-Desktop.exe",),
+    "linux": ("Arena-Desktop-linux-x86_64", "Arena-Desktop.AppImage"),
+    "darwin": ("Arena-Desktop-macos-universal", "Arena-Desktop-macos"),
+}
+_ASSET_FALLBACK_MARKERS = {
+    "win32": (".exe",),
+    "linux": (".appimage", "linux"),
+    "darwin": ("macos", "darwin"),
+}
+
+
+def pick_asset(release: Dict[str, Any], platform: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    key = _platform_key(platform)
     assets = release.get("assets") or []
+    for name in _ASSET_PREFERENCES[key]:
+        for a in assets:
+            if str(a.get("name", "")).lower() == name.lower():
+                return a
     for a in assets:
-        if a.get("name") == ASSET_NAME:
-            return a
-    for a in assets:
-        if str(a.get("name", "")).lower().endswith(".exe") and "setup" not in a["name"].lower():
+        name = str(a.get("name", "")).lower()
+        if "setup" in name:
+            continue
+        if any(name.endswith(m) if m.startswith(".") else m in name
+               for m in _ASSET_FALLBACK_MARKERS[key]):
             return a
     return None
 
 
-def release_info(release: Dict[str, Any]) -> Dict[str, Any]:
-    asset = pick_asset(release)
+def _bin_suffix(platform: Optional[str] = None) -> str:
+    return ".exe" if _platform_key(platform) == "win32" else ""
+
+
+def _valid_magic(head: bytes, platform: Optional[str] = None) -> bool:
+    """The download must be this platform's kind of executable before install."""
+    key = _platform_key(platform)
+    if key == "win32":
+        return head.startswith(b"MZ")
+    if key == "darwin":
+        return head[:4] in {b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xcf",
+                            b"\xfe\xed\xfa\xce", b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca"}
+    return head.startswith(b"\x7fELF")  # linux: ELF one-file build or AppImage
+
+
+def release_info(release: Dict[str, Any], platform: Optional[str] = None) -> Dict[str, Any]:
+    asset = pick_asset(release, platform)
     sha = ""
     if asset and str(asset.get("digest", "")).startswith("sha256:"):
         sha = asset["digest"].split(":", 1)[1]
+    sig = _sig_asset_url(release, platform)
     return {
         "notes": plain_notes(release.get("body") or ""),
         "asset_url": asset.get("browser_download_url") if asset else None,
         "asset_size": asset.get("size") if asset else None,
         "sha256": sha,
-        "sig_url": _sig_asset_url(release),
-        "signed": _sig_asset_url(release) is not None,
+        "sig_url": sig,
+        "signed": sig is not None,
         "can_install": bool(asset) and bool(getattr(sys, "frozen", False)),
     }
 
 
-def _sig_asset_url(release: Dict[str, Any]) -> Optional[str]:
+def _sig_asset_url(release: Dict[str, Any], platform: Optional[str] = None) -> Optional[str]:
+    asset = pick_asset(release, platform)
+    if not asset:
+        return None
+    want = f"{asset.get('name', '')}.sig".lower()
     for a in release.get("assets") or []:
-        if str(a.get("name", "")).lower() == f"{ASSET_NAME}.sig".lower():
+        if str(a.get("name", "")).lower() == want:
             return a.get("browser_download_url")
     return None
 
@@ -173,8 +219,8 @@ def _download(url: str, dest: Path, want_sha: str, version: str, expected: int =
             _set(state="error", error="Download failed its safety check (checksum mismatch). Nothing was installed.")
             return
         with open(tmp, "rb") as f:
-            magic = f.read(2)
-        if tmp.stat().st_size < 1_000_000 or magic != b"MZ":
+            head = f.read(4)
+        if tmp.stat().st_size < 1_000_000 or not _valid_magic(head):
             tmp.unlink(missing_ok=True)
             _set(state="error", error="Downloaded file is not a valid app. Nothing was installed.")
             return
@@ -212,7 +258,8 @@ def start_download(info: Dict[str, Any], release: Dict[str, Any]) -> Dict[str, A
         return {"ok": False, "error": "One-click updates work in the installed app. Download the new version from GitHub."}
     url = info.get("asset_url")
     if not url:
-        return {"ok": False, "error": "This release has no Arena-Desktop.exe to install."}
+        name = _ASSET_PREFERENCES[_platform_key()][0]
+        return {"ok": False, "error": f"This release has no {name} to install."}
     with _lock:
         if _job.get("state") == "downloading":
             return {"ok": True, "state": "downloading"}
@@ -221,7 +268,7 @@ def start_download(info: Dict[str, Any], release: Dict[str, Any]) -> Dict[str, A
                     version=info["latest"], notes=info.get("notes") or [])
     want = info.get("sha256") or _fetch_sha(release)
     sig_url = info.get("sig_url") or _sig_asset_url(release)
-    dest = UPDATES_DIR / f"Arena-Desktop-{info['latest']}.exe"
+    dest = UPDATES_DIR / f"Arena-Desktop-{info['latest']}{_bin_suffix()}"
     threading.Thread(target=_download,
                      args=(url, dest, want, info["latest"], int(info.get("asset_size") or 0), sig_url),
                      daemon=True).start()
@@ -251,6 +298,43 @@ if ($ok) {
 """
 
 
+# POSIX (Linux/macOS) swap helper: same duties as the PowerShell one - wait
+# for the app to exit, replace the binary atomically (copy, chmod, rename),
+# record the version, relaunch on BOTH paths and leave a failure marker when
+# the swap could not happen. Paths are single-quoted with shell escaping.
+_POSIX_HELPER = """#!/bin/sh
+pid=@@PID@@
+new='@@NEW@@'
+target='@@TARGET@@'
+ver='@@VER@@'
+i=0
+while kill -0 "$pid" 2>/dev/null && [ $i -lt 120 ]; do sleep 0.5; i=$((i+1)); done
+ok=0
+n=0
+while [ $n -lt 40 ]; do
+  if cp "$new" "$target.tmp" 2>/dev/null && chmod 755 "$target.tmp" 2>/dev/null && mv -f "$target.tmp" "$target" 2>/dev/null; then ok=1; break; fi
+  sleep 0.5
+  n=$((n+1))
+done
+if [ "$ok" = 1 ]; then
+  rm -f "$new"
+  printf '%s' "$ver" > "$(dirname "$target")/version.txt" 2>/dev/null
+  exec "$target"
+else
+  rm -f "$target.tmp"
+  printf 'Could not replace %s' "$target" > "$(dirname "$new")/update-failed.txt" 2>/dev/null
+  exec "$target"
+fi
+"""
+
+
+def posix_helper_script(pid: Any, new: Any, target: Any, ver: Any) -> str:
+    q = lambda p: str(p).replace("'", "'\\''")  # noqa: E731
+    return (_POSIX_HELPER.replace("@@PID@@", str(int(pid)))
+            .replace("@@NEW@@", q(new)).replace("@@TARGET@@", q(target))
+            .replace("@@VER@@", q(ver)))
+
+
 def apply() -> Dict[str, Any]:
     """Write the helper, start it detached, and tell the caller to exit."""
     st = status()
@@ -262,16 +346,25 @@ def apply() -> Dict[str, Any]:
         WHATSNEW_FILE.write_text(json.dumps({
             "version": st.get("version"), "from": __version__,
             "notes": st.get("notes") or [], "ts": time.time()}), encoding="utf-8")
-        script = UPDATES_DIR / "apply-update.ps1"
-        q = lambda p: str(p).replace("'", "''")  # noqa: E731
-        body = (_HELPER.replace("@@PID@@", str(os.getpid())).replace("@@NEW@@", q(st["path"]))
-                .replace("@@TARGET@@", q(target)).replace("@@VER@@", q(st.get("version")))
-                .replace("@@KEY@@", UNINSTALL_KEY))
-        script.write_text(body, encoding="utf-8")
-        flags = 0x08000000 | 0x00000008  # CREATE_NO_WINDOW | DETACHED_PROCESS
-        subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-                          "-WindowStyle", "Hidden", "-File", str(script)],
-                         creationflags=flags, close_fds=True)
+        if sys.platform == "win32":
+            script = UPDATES_DIR / "apply-update.ps1"
+            q = lambda p: str(p).replace("'", "''")  # noqa: E731
+            body = (_HELPER.replace("@@PID@@", str(os.getpid())).replace("@@NEW@@", q(st["path"]))
+                    .replace("@@TARGET@@", q(target)).replace("@@VER@@", q(st.get("version")))
+                    .replace("@@KEY@@", UNINSTALL_KEY))
+            script.write_text(body, encoding="utf-8")
+            flags = 0x08000000 | 0x00000008  # CREATE_NO_WINDOW | DETACHED_PROCESS
+            subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                              "-WindowStyle", "Hidden", "-File", str(script)],
+                             creationflags=flags, close_fds=True)
+        else:
+            script = UPDATES_DIR / "apply-update.sh"
+            script.write_text(posix_helper_script(os.getpid(), st["path"], target, st.get("version")),
+                              encoding="utf-8")
+            script.chmod(0o755)
+            subprocess.Popen(["/bin/sh", str(script)],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
     except OSError as e:
         return {"ok": False, "error": f"Could not start the update: {e}"}
     _set(state="applying")

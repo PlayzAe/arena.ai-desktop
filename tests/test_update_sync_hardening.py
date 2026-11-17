@@ -106,6 +106,7 @@ def test_truncated_download_without_checksum_is_rejected(tmp_path, monkeypatch):
     monkeypatch.setattr(updater, "UPDATES_DIR", tmp_path / "up")
     monkeypatch.setattr(updater, "_job", {})
     monkeypatch.setattr(updater.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(updater.sys, "platform", "win32", raising=False)  # MZ bodies
     body = b"MZ" + b"\0" * (1_200_000 - 2)  # 1.2 MB arrives of the promised 2 MB
     monkeypatch.setattr(updater, "_open_stream", lambda url, timeout=0: _StreamResp(body, 0))
     res = updater.start_download(
@@ -126,6 +127,7 @@ def test_complete_download_without_checksum_is_ready(tmp_path, monkeypatch):
     monkeypatch.setattr(updater, "UPDATES_DIR", tmp_path / "up")
     monkeypatch.setattr(updater, "_job", {})
     monkeypatch.setattr(updater, "_open_stream", lambda url, timeout=0: _StreamResp(body, len(body)))
+    monkeypatch.setattr(updater.sys, "platform", "win32", raising=False)  # MZ bodies
     updater._download("https://example.invalid/a.exe", tmp_path / "up" / "new.exe", "", "9.9.9")
     st = updater.status()
     assert st["state"] == "ready" and st["verified"] is False
@@ -147,6 +149,7 @@ def test_content_encoded_download_is_not_flagged_truncated(tmp_path, monkeypatch
 
     monkeypatch.setattr(updater, "UPDATES_DIR", tmp_path / "up")
     monkeypatch.setattr(updater, "_open_stream", lambda url, timeout=0: Encoded())
+    monkeypatch.setattr(updater.sys, "platform", "win32", raising=False)  # MZ bodies
     monkeypatch.setattr(updater, "_job", {})
     updater._download("https://example.invalid/a.exe", tmp_path / "up" / "new.exe", "", "9.9.9",
                       expected=len(body))
