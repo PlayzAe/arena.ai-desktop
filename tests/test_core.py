@@ -1026,6 +1026,21 @@ def test_code_answer_is_copied_into_the_picked_folder_and_local_edits_go_back(we
     assert "--- src/App.tsx ---\nhello\nmine\n" in content and content.endswith("My message:\nnext")
 
 
+def test_named_project_files_ride_the_message_even_on_the_first_send(web, tmp_path):
+    """A file the AI never wrote, named in the message, must reach it - the KNOWN_ISSUES
+    gap where asking to edit an existing file made the AI create a new one instead."""
+    appmod, c, cfg, use, sent = web
+    cfg.update(permission_mode="acceptEdits", workspace_dir=str(tmp_path / "ws"))
+    (tmp_path / "ws").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "ws" / "kimi-k3.txt").write_text("hello\nworld\n")
+    appmod._ui_mode, appmod._ui_modality = "direct", "code"
+    use(FakeResp(['a0:"ok"']))
+    events(c.post("/api/chat", json={"message": "fix kimi-k3.txt please", "model_id": "m1"}))
+    content = sent[-1][1]["userMessage"]["content"]
+    assert "--- kimi-k3.txt ---\nhello\nworld\n" in content
+    assert content.endswith("My message:\nfix kimi-k3.txt please")
+
+
 # ---------- v4: automatic Agent, generation state, cloud history, panel API ----------
 
 def test_status_reports_only_real_generation_as_generating(web):

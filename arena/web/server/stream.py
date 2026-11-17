@@ -1044,8 +1044,98 @@ def _sync_from_manifest_inner(conv: dict, lane: str = "a"):
                             "get them, or save them from the Arena window."})
 
 
-def _local_edits(root: Path):
-    """Files the user changed on disk since the AI last wrote them, as a note in front of the next message."""
+_FILE_TOKEN = re.compile(r"(?<![\w.\-])([\w.\-]+(?:[/\\][\w.\-]+)+|[\w.\-]+\.[A-Za-z0-9]{1,8})(?![\w.\-])")
+_SKIP_WALK = {"node_modules", ".venv", "venv", "__pycache__", "dist", "build", ".idea", ".vscode", "out", "target"}
+_SENSITIVE_NAMES = {".netrc", ".pypirc", ".npmrc", ".gitconfig", ".bash_history", ".zsh_history",
+                    "id_rsa", "id_ed25519", "id_dsa", "id_ecdsa", "credentials", "secrets.json"}
+_SENSITIVE_EXT = re.compile(r"\.(pem|key|p12|pfx|ppk|kdbx)$", re.I)
+
+
+def _sensitive_rel(rel: str) -> bool:
+    """Paths that never ride to the AI automatically: keys, env files, dotfile secrets."""
+    parts = [p.lower() for p in (rel or "").replace("\\", "/").split("/") if p]
+    if not parts:
+        return True
+    if any(p in {s.lower() for s in _SENSITIVE_DIRS} for p in parts):
+        return True
+    name = parts[-1]
+    return name.startswith(".env") or name in _SENSITIVE_NAMES or bool(_SENSITIVE_EXT.search(name))
+
+
+def _unique_named_file(root: Path, name: str):
+    """The one file with this basename in the project, else None when zero or ambiguous."""
+    low, hits, visited = (name or "").lower(), [], 0
+    if not low:
+        return None
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d.lower() not in _SKIP_WALK and not _sensitive_rel(d)]
+        for f in filenames:
+            visited += 1
+            if visited > 5000:
+                return None
+            if f.lower() == low:
+                hits.append(Path(dirpath) / f)
+                if len(hits) > 1:
+                    return None
+    return hits[0] if len(hits) == 1 else None
+
+
+def _read_project_file(root: Path, rel: str, man: dict):
+    """(rel, bytes) for one message-named project file the AI has not seen, else None.
+    Only an exact relative path or a unique basename inside the project; never
+    traversal, sensitive paths, binaries, or content the AI already has."""
+    rel = (rel or "").replace("\\", "/")
+    while rel.startswith("./"):
+        rel = rel[2:]
+    if not rel:
+        return None
+    target = None
+    if not rel.startswith("/") and not re.match(r"^[A-Za-z]:", rel) and ".." not in rel.split("/"):
+        try:
+            target = sandbox_sync.inside(root, rel)
+        except ValueError:
+            target = None
+    if target is not None and not target.is_file():
+        target = None
+    if target is None:
+        target = _unique_named_file(root, rel.rsplit("/", 1)[-1])
+    if target is None or not target.is_file():
+        return None
+    try:
+        rel = target.resolve().relative_to(Path(root).resolve()).as_posix()
+        target = sandbox_sync.inside(root, rel)
+    except (ValueError, OSError):
+        return None
+    if _sensitive_rel(rel):
+        return None
+    try:
+        data = target.read_bytes()
+    except OSError:
+        return None
+    if len(data) > 1_000_000 or not _looks_like_text(data):
+        return None
+    if man.get(rel) == _digest(data):
+        return None
+    return rel, data
+
+
+def _named_local_files(root: Path, message: str, man: dict):
+    """Project files named in the user's message that the AI has never written."""
+    out, seen = [], set()
+    for token in _FILE_TOKEN.findall(message or ""):
+        if token in seen:
+            continue
+        seen.add(token)
+        hit = _read_project_file(root, token, man)
+        if hit:
+            out.append(hit)
+    return out
+
+
+def _local_edits(root: Path, message: str = ""):
+    """Files on the user's computer the AI needs as a note in front of the next message:
+    the ones it wrote and the user changed since, plus project files named in the
+    message it has never seen."""
     man = _sync_load(root)
     changed, parts, size = [], [], 0
     for rel, digest in list(man.items()):
@@ -1061,12 +1151,21 @@ def _local_edits(root: Path):
             parts.append(f"--- {rel} ---\n{text}")
             size += len(text)
         man[rel] = _digest(data)
+    for rel, data in _named_local_files(root, message, man):
+        if rel in changed:
+            continue
+        changed.append(rel)
+        text = data.decode("utf-8", "replace")
+        if size + len(text) <= 60_000 and len(parts) < 12:
+            parts.append(f"--- {rel} ---\n{text}")
+            size += len(text)
+            man[rel] = _digest(data)  # the AI has it now; later edits ride the channel above
     if not changed:
         return [], ""
     _sync_save(root, man)
     extra = [r for r in changed if not any(p.startswith(f"--- {r} ---") for p in parts)]
-    note = ("I edited these files on my computer since your last change. Update your copy of each one to exactly "
-            "this content before you continue:\n\n" + "\n\n".join(parts)
+    note = ("These files on my computer are new or changed since your last copy. Update your "
+            "copy of each one to exactly this content before you continue:\n\n" + "\n\n".join(parts)
             + (f"\n\nAlso changed (too large to include): {', '.join(extra)}" if extra else "") + "\n\nMy message:\n")
     return changed, note
 

@@ -61,6 +61,7 @@ Arena added a daily credit limit to something that used to be free. Per [Arena's
 - Images saved under `public/` are downloaded. `cp`, `mv` and `mkdir` from the sandbox are repeated locally.
 - `npm install` runs on your PC (automatic in Accept edits and Bypass permissions, asks in other modes, never in Plan mode). Use **Run on this PC** to start the dev server and **Stop** to end it.
 - Your own files are never overwritten by Arena's starter files.
+- Project files you name in your message (for example an existing `kimi-k3.txt`) are sent to the AI with the message, so it edits your file instead of creating a new one.
 
 ### Install and update in one click
 
