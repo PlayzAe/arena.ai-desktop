@@ -911,12 +911,11 @@ def _finish_sandbox(conv: dict):
         if mode == "plan":
             yield _sse({"type": "notice", "text": f"Plan mode: not running `{cmdline}` here. Run it yourself in {root}."})
             continue
-        if mode in ("acceptEdits", "bypassPermissions"):
-            allow = True
-        else:
-            allow = (yield from _permit(mode, "run_cmd", {
-                "tool": "run_cmd", "command": cmdline, "path": str(root), "rel": ".", "inside": True,
-                "summary": f"Run `{cmdline}` in {root} so the project works on this computer"})) == "allow"
+        # npm install runs package lifecycle scripts (arbitrary code), so the
+        # permission broker decides; bypassPermissions answers 'allow' on its own.
+        allow = (yield from _permit(mode, "run_cmd", {
+            "tool": "run_cmd", "command": cmdline, "path": str(root), "rel": ".", "inside": True,
+            "summary": f"Run `{cmdline}` in {root} so the project works on this computer"})) == "allow"
         if not allow:
             yield _sse({"type": "notice", "text": f"Not installed. Run `{cmdline}` in {root} when you are ready."})
             continue

@@ -13,6 +13,7 @@ import json
 import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 ORIGIN = "https://arena.ai"
 
@@ -468,6 +469,26 @@ def classify_error(status: int, text: str = "", headers=None) -> Dict[str, Any]:
 
 
 _PREVIEW_KEYS = ("previewUrl", "sandboxPreviewUrl", "sandboxUrl", "deploymentUrl", "deployUrl", "webUrl")
+_ARENA_HOST = re.compile(r"^(?:[a-z0-9-]+\.)*arena\.site$", re.I)
+
+
+def _is_arena_site_url(url: str) -> bool:
+    """True only when the URL host itself is arena.site (or a subdomain);
+    a substring like '.arena.site' anywhere else in the URL must not pass.
+    Backslashes anywhere and userinfo in the netloc are refused too: browsers
+    normalize '\' to '/' (host confusion) and strip userinfo, so urlsplit and
+    the browser would disagree about the host."""
+    if "\\" in url:
+        return False
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname or ""
+        netloc = parts.netloc
+    except ValueError:
+        return False
+    if "@" in netloc:
+        return False
+    return bool(_ARENA_HOST.match(host))
 
 
 def find_preview_url(value: Any, depth: int = 0) -> Optional[str]:
@@ -481,7 +502,7 @@ def find_preview_url(value: Any, depth: int = 0) -> Optional[str]:
         items = list(value.values())
     elif isinstance(value, list):
         items = value
-    elif isinstance(value, str) and value.startswith("http") and ".arena.site" in value:
+    elif isinstance(value, str) and value.startswith("http") and _is_arena_site_url(value):
         return value
     else:
         return None
