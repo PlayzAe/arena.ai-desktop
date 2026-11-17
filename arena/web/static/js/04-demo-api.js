@@ -365,6 +365,10 @@
       demoWorkspaceFileData[key] = String(content ?? '');
       return { ok: true, path: key, name: key.split('/').pop(), size: demoWorkspaceFileData[key].length, demo: true };
     },
+    async getWorkspaceStamp() {
+      await sleep(40);
+      return { ok: true, stamp: 'demo', path: '.', demo: true };
+    },
     async getChatProject() {
       await sleep(60);
       return { root: demoStore.workspace, rel: '.', name: 'Demo', lane: 'a', mode: 'direct', modality: 'webdev', demo: true };

@@ -676,6 +676,7 @@
       return resp.json();
     },
     getWorkspaceFile(path) { return this.request(`/api/workspace/file?path=${encodeURIComponent(path)}`); },
+    getWorkspaceStamp(path = '.') { return this.request(`/api/workspace/stamp?path=${encodeURIComponent(path)}`); },
     saveWorkspaceFile(path, content) { return this.request('/api/workspace/file', { method: 'POST', body: { path, content } }); },
     getChatProject(chatId) { return this.request(`/api/chats/${encodeURIComponent(chatId)}/project`); },
     async downloadWorkspaceFile(path) {
@@ -1482,6 +1483,10 @@
       const key = String(path || '');
       demoWorkspaceFileData[key] = String(content ?? '');
       return { ok: true, path: key, name: key.split('/').pop(), size: demoWorkspaceFileData[key].length, demo: true };
+    },
+    async getWorkspaceStamp() {
+      await sleep(40);
+      return { ok: true, stamp: 'demo', path: '.', demo: true };
     },
     async getChatProject() {
       await sleep(60);
@@ -10312,6 +10317,7 @@ You can start with a more structured option: one script, short captions, and a c
     state.workspaceExpanded = new Set();
     state.workspaceLoadingPaths = new Set();
     state.workspaceRequest += 1;
+    resetWorkspaceStampWatch();
   }
 
   // The Workspace panel follows the folder by itself: a folder being chosen or
@@ -10327,6 +10333,51 @@ You can start with a more structured option: one script, short captions, and a c
       const expanded = [...(state.workspaceExpanded || [])];
       await Promise.allSettled(expanded.map((path) => loadWorkspaceTree(path, { force: true })));
     }, delay);
+  }
+
+  // Changes made *outside* the app (edits in VS Code, builds, git) reach the
+  // tree through a cheap folder-stamp poll: while the panel is open and the
+  // window is visible, ask for the stamp every few seconds and reload the
+  // tree only when it moved. The poll pauses itself when nothing needs it.
+  let workspaceStampTimer = null;
+  let workspaceStampLast = null;
+  const WORKSPACE_STAMP_POLL_MS = 2500;
+
+  function scheduleWorkspaceStampPoll(delay = WORKSPACE_STAMP_POLL_MS) {
+    if (workspaceStampTimer) window.clearTimeout(workspaceStampTimer);
+    workspaceStampTimer = window.setTimeout(pollWorkspaceStamp, delay);
+  }
+
+  async function pollWorkspaceStamp() {
+    workspaceStampTimer = null;
+    if (!state.workspacePanelOpen || state.serverError || document.hidden) {
+      scheduleWorkspaceStampPoll();
+      return;
+    }
+    try {
+      const data = await API.getWorkspaceStamp('.');
+      const stamp = String(data?.stamp || '');
+      if (stamp) {
+        if (workspaceStampLast === null) workspaceStampLast = stamp;
+        else if (stamp !== workspaceStampLast) {
+          workspaceStampLast = stamp;
+          scheduleWorkspaceTreeRefresh(0);
+          if (typeof scheduleChatProjectRefresh === 'function') scheduleChatProjectRefresh();
+        }
+      }
+    } catch { /* transient: retry on the next tick */ }
+    scheduleWorkspaceStampPoll();
+  }
+
+  function resetWorkspaceStampWatch() {
+    workspaceStampLast = null;
+    scheduleWorkspaceStampPoll(600);
+  }
+
+  function stopWorkspaceStampWatch() {
+    if (workspaceStampTimer) window.clearTimeout(workspaceStampTimer);
+    workspaceStampTimer = null;
+    workspaceStampLast = null;
   }
 
   function syncWorkspacePanelVisibility() {
@@ -10345,6 +10396,8 @@ You can start with a more structured option: one script, short captions, and a c
   function setWorkspacePanelOpen(open, { focusConnectors = false, persist = true, load = true } = {}) {
     state.workspacePanelOpen = Boolean(open);
     syncWorkspacePanelVisibility();
+    if (state.workspacePanelOpen) resetWorkspaceStampWatch();
+    else stopWorkspaceStampWatch();
     if (persist) {
       try { localStorage.setItem('arenaPersonal.workspacePanelOpen.v4', state.workspacePanelOpen ? '1' : '0'); } catch { /* storage unavailable */ }
     }

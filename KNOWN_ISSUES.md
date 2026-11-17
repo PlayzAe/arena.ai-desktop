@@ -19,7 +19,7 @@ Things that are broken or unfinished in Arena Desktop. Fixes and pull requests a
 
 ## Workspace
 
-- **Tree does not auto-refresh.** Changing files outside the app (e.g. in VS Code) does not update the workspace panel until you manually navigate or refresh.
+- **Tree auto-refreshes on a lightweight poll (fixed in 1.6.x).** Changing files outside the app (e.g. in VS Code) used to leave the workspace panel stale until you manually navigated or refreshed. The panel now polls a cheap folder-change stamp every few seconds while it is open (and the window is visible) and reloads the tree - keeping every expanded folder - only when something visible actually changed. Byte-only edits the tree cannot show (same name, size and modified time) do not trigger reload churn, and dependency/log folders (`node_modules`, `.git`, caches, `.arena-artifacts`) never cause refreshes.
 - **Workspace preview runs scripts in a sandbox.** As of v1.3.0, `allow-scripts` is re-enabled with an opaque origin. Scripts run but cannot access the app's cookies or API token.
 
 ## Security (v1.5.0)

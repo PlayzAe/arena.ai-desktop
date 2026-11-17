@@ -1438,3 +1438,50 @@ def test_code_project_tree_and_file_editor(site):
         assert saved[0].get('content') == 'hello v2'
         assert not errors, errors
         browser.close()
+
+
+def test_workspace_tree_autorefreshes_on_external_change(site):
+    """External edits (VS Code and friends) reach the workspace tree through the
+    stamp poll: the tree must reload by itself when the stamp moves."""
+    sync_api = pytest.importorskip('playwright.sync_api')
+    with sync_api.sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=['--no-sandbox'])
+        page = browser.new_page(viewport={'width': 1300, 'height': 900})
+        errors = []
+        page.on('pageerror', lambda err: errors.append(str(err)))
+        counter = {'stamp': 0}
+
+        def api(route):
+            path = route.request.url.split('?', 1)[0].split('/api/', 1)[1]
+            if path == 'workspace/stamp':
+                counter['stamp'] += 1
+                stamp = 'two' if counter['stamp'] >= 3 else 'one'
+                return route.fulfill(status=200, content_type='application/json',
+                                     body=json.dumps({'ok': True, 'stamp': stamp, 'path': '.'}))
+            if path == 'workspace/tree':
+                name = 'new.txt' if counter['stamp'] >= 3 else 'old.txt'
+                return route.fulfill(status=200, content_type='application/json', body=json.dumps(
+                    {'root': '.', 'path': '.',
+                     'entries': [{'name': name, 'path': name, 'is_dir': False, 'size': 1}],
+                     'truncated': False}))
+            values = {
+                'status': {'authenticated': True, 'mode': 'direct', 'modality': 'text', 'desktop': True,
+                           'permission_mode': 'default', 'workspace': 'C:\\test'},
+                'chats': [], 'history': [], 'models': [{'id': 'm1', 'name': 'Model One'}], 'permissions': [],
+                'permission-mode': {'ok': True, 'mode': 'default'},
+                'workspace': {'workspace': 'C:\\test', 'projects': []},
+                'settings': {'setup_done': True},
+            }
+            return route.fulfill(status=200, content_type='application/json', body=json.dumps(values.get(path, {'ok': True})))
+
+        page.route('**/api/**', api)
+        page.goto(site, wait_until='networkidle')
+        panel = page.locator('#workspacePanel')
+        panel.wait_for(state='visible', timeout=10000)
+        panel.get_by_text('old.txt').wait_for(timeout=10000)
+        # nobody clicks anything: the poll must notice the stamp change alone
+        panel.get_by_text('new.txt').wait_for(timeout=15000)
+        assert 'old.txt' not in panel.inner_text()
+        assert counter['stamp'] >= 3
+        assert not errors, errors
+        browser.close()

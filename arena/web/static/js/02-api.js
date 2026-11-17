@@ -179,6 +179,7 @@
       return resp.json();
     },
     getWorkspaceFile(path) { return this.request(`/api/workspace/file?path=${encodeURIComponent(path)}`); },
+    getWorkspaceStamp(path = '.') { return this.request(`/api/workspace/stamp?path=${encodeURIComponent(path)}`); },
     saveWorkspaceFile(path, content) { return this.request('/api/workspace/file', { method: 'POST', body: { path, content } }); },
     getChatProject(chatId) { return this.request(`/api/chats/${encodeURIComponent(chatId)}/project`); },
     async downloadWorkspaceFile(path) {
