@@ -295,16 +295,6 @@ _update_cache = {"t": 0.0, "data": None}
 _release_cache: dict = {}
 
 
-def _version_tuple(v) -> tuple:
-    parts = []
-    for bit in str(v or "").lstrip("v").split("."):
-        try:
-            parts.append(int(bit))
-        except ValueError:
-            parts.append(0)
-    return tuple(parts) or (0,)
-
-
 @app.route("/api/update-check")
 def api_update_check():
     """Compare APP_VERSION with the latest GitHub release (cached 6h).
@@ -336,7 +326,7 @@ def api_update_check():
             data["latest"] = latest or None
             data["url"] = payload.get("html_url")
             data["prerelease"] = bool(payload.get("prerelease"))
-            data["update"] = bool(latest) and _version_tuple(latest) > _version_tuple(APP_VERSION)
+            data["update"] = bool(latest) and updater.version_tuple(latest) > updater.version_tuple(APP_VERSION)
             data.update(updater.release_info(payload))
             _release_cache[channel] = payload
         else:

@@ -106,7 +106,7 @@ def _set(**kw: Any) -> None:
         _job.update(kw)
 
 
-def _download(url: str, dest: Path, want_sha: str, version: str) -> None:
+def _download(url: str, dest: Path, want_sha: str, version: str, expected: int = 0) -> None:
     try:
         UPDATES_DIR.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_suffix(".part")
@@ -114,19 +114,33 @@ def _download(url: str, dest: Path, want_sha: str, version: str) -> None:
         with requests.get(url, stream=True, timeout=30,
                           headers={"User-Agent": f"Arena-Desktop/{__version__}"}) as r:
             r.raise_for_status()
-            total = int(r.headers.get("Content-Length") or 0)
+            # Content-Length is only the file size when the body is not encoded;
+            # for gzip responses it counts compressed bytes while iter_content
+            # yields the decompressed file.
+            enc = (r.headers.get("Content-Encoding") or "").strip().lower()
+            total = 0 if enc and enc != "identity" else int(r.headers.get("Content-Length") or 0)
             done = 0
             with open(tmp, "wb") as f:
                 for chunk in r.iter_content(1 << 20):
                     f.write(chunk)
                     h.update(chunk)
                     done += len(chunk)
-                    _set(done=done, total=total)
+                    _set(done=done, total=total or expected)
+        # A cut connection on a close-framed response ends the stream cleanly and
+        # leaves a valid-looking prefix behind; the size is the only witness when
+        # no checksum is available.
+        want = total or int(expected or 0)
+        if want and done != want:
+            tmp.unlink(missing_ok=True)
+            _set(state="error", error=f"Download truncated: got {done:,} of {want:,} bytes. Nothing was installed.")
+            return
         if want_sha and h.hexdigest().lower() != want_sha.lower():
             tmp.unlink(missing_ok=True)
             _set(state="error", error="Download failed its safety check (checksum mismatch). Nothing was installed.")
             return
-        if tmp.stat().st_size < 1_000_000 or tmp.read_bytes()[:2] != b"MZ":
+        with open(tmp, "rb") as f:
+            magic = f.read(2)
+        if tmp.stat().st_size < 1_000_000 or magic != b"MZ":
             tmp.unlink(missing_ok=True)
             _set(state="error", error="Downloaded file is not a valid app. Nothing was installed.")
             return
@@ -150,7 +164,9 @@ def start_download(info: Dict[str, Any], release: Dict[str, Any]) -> Dict[str, A
                     version=info["latest"], notes=info.get("notes") or [])
     want = info.get("sha256") or _fetch_sha(release)
     dest = UPDATES_DIR / f"Arena-Desktop-{info['latest']}.exe"
-    threading.Thread(target=_download, args=(url, dest, want, info["latest"]), daemon=True).start()
+    threading.Thread(target=_download,
+                     args=(url, dest, want, info["latest"], int(info.get("asset_size") or 0)),
+                     daemon=True).start()
     return {"ok": True, "state": "downloading"}
 
 
@@ -169,6 +185,9 @@ if ($ok) {
   Remove-Item -LiteralPath $new -Force -ErrorAction SilentlyContinue
   try { Set-ItemProperty -Path '@@KEY@@' -Name DisplayVersion -Value $ver -ErrorAction Stop } catch {}
   try { Set-Content -LiteralPath (Join-Path (Split-Path $target) 'version.txt') -Value $ver -Encoding UTF8 } catch {}
+  Start-Process -FilePath $target
+} else {
+  try { Set-Content -LiteralPath (Join-Path (Split-Path $new) 'update-failed.txt') -Value ('Could not replace ' + $target) -Encoding UTF8 } catch {}
   Start-Process -FilePath $target
 }
 """

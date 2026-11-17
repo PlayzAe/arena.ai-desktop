@@ -17,17 +17,22 @@ from typing import Any, Dict, List, Optional, Tuple
 
 PREVIEW_HOST = "{id}.arena.site"
 MEDIA_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif", ".svg", ".ico", ".mp4", ".webm", ".mp3", ".wav", ".ogg", ".woff", ".woff2", ".ttf", ".otf"}
+_MSG_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _NPM_NAME = re.compile(r"^(@[a-z0-9][\w.-]*/)?[a-z0-9][\w.-]*(@[\w.^~<>=*|-]+)?$", re.I)
 _OPERATORS = {"&&", ";", "||"}
 _UNSAFE = {"|", ">", ">>", "<", "&", "2>", "2>&1", "<<"}
 
 
 def preview_url(message_id: str, rel: str) -> Optional[str]:
-    """Where Arena's preview host serves a sandbox file. Only public/ files are served at the site root."""
-    rel = rel.replace("\\", "/").lstrip("./")
-    if not message_id or not rel.startswith("public/"):
+    """Where Arena's preview host serves a sandbox file. Only public/ files are served at the site root.
+
+    message_id arrives on the stream and becomes a hostname label, so the charset
+    check keeps it from redirecting the download to another host."""
+    mid = (message_id or "").strip()
+    rel = (rel or "").replace("\\", "/").lstrip("./")
+    if not _MSG_ID.match(mid) or not rel.startswith("public/"):
         return None
-    return f"https://{PREVIEW_HOST.format(id=message_id)}/{rel[len('public/'):]}"
+    return f"https://{PREVIEW_HOST.format(id=mid)}/{rel[len('public/'):]}"
 
 
 def is_binary_path(rel: str) -> bool:
@@ -36,6 +41,7 @@ def is_binary_path(rel: str) -> bool:
 
 def inside(root: Path, rel: str) -> Path:
     """Resolve rel under root; ValueError for absolute paths and traversal."""
+    root = Path(root).resolve()
     rel = (rel or "").replace("\\", "/")
     if not rel or rel.startswith("/") or re.match(r"^[A-Za-z]:", rel):
         raise ValueError(f"unsafe path: {rel!r}")
@@ -113,6 +119,7 @@ def npm_packages(command: str) -> Optional[List[str]]:
 def replay_fs(root: Path, command: str) -> List[Dict[str, str]]:
     """Redo mkdir / cp / mv from a sandbox bash line on the local folder. Returns one result per action."""
     results: List[Dict[str, str]] = []
+    root = Path(root).resolve()
     cwd = root
     for seg in _segments(command):
         name, args = seg[0], [a for a in seg[1:]]
