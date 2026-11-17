@@ -40,6 +40,7 @@
     state.workspaceExpanded = new Set();
     state.workspaceLoadingPaths = new Set();
     state.workspaceRequest += 1;
+    resetWorkspaceStampWatch();
   }
 
   // The Workspace panel follows the folder by itself: a folder being chosen or
@@ -55,6 +56,51 @@
       const expanded = [...(state.workspaceExpanded || [])];
       await Promise.allSettled(expanded.map((path) => loadWorkspaceTree(path, { force: true })));
     }, delay);
+  }
+
+  // Changes made *outside* the app (edits in VS Code, builds, git) reach the
+  // tree through a cheap folder-stamp poll: while the panel is open and the
+  // window is visible, ask for the stamp every few seconds and reload the
+  // tree only when it moved. The poll pauses itself when nothing needs it.
+  let workspaceStampTimer = null;
+  let workspaceStampLast = null;
+  const WORKSPACE_STAMP_POLL_MS = 2500;
+
+  function scheduleWorkspaceStampPoll(delay = WORKSPACE_STAMP_POLL_MS) {
+    if (workspaceStampTimer) window.clearTimeout(workspaceStampTimer);
+    workspaceStampTimer = window.setTimeout(pollWorkspaceStamp, delay);
+  }
+
+  async function pollWorkspaceStamp() {
+    workspaceStampTimer = null;
+    if (!state.workspacePanelOpen || state.serverError || document.hidden) {
+      scheduleWorkspaceStampPoll();
+      return;
+    }
+    try {
+      const data = await API.getWorkspaceStamp('.');
+      const stamp = String(data?.stamp || '');
+      if (stamp) {
+        if (workspaceStampLast === null) workspaceStampLast = stamp;
+        else if (stamp !== workspaceStampLast) {
+          workspaceStampLast = stamp;
+          scheduleWorkspaceTreeRefresh(0);
+          if (typeof scheduleChatProjectRefresh === 'function') scheduleChatProjectRefresh();
+        }
+      }
+    } catch { /* transient: retry on the next tick */ }
+    scheduleWorkspaceStampPoll();
+  }
+
+  function resetWorkspaceStampWatch() {
+    workspaceStampLast = null;
+    scheduleWorkspaceStampPoll(600);
+  }
+
+  function stopWorkspaceStampWatch() {
+    if (workspaceStampTimer) window.clearTimeout(workspaceStampTimer);
+    workspaceStampTimer = null;
+    workspaceStampLast = null;
   }
 
   function syncWorkspacePanelVisibility() {
@@ -73,6 +119,8 @@
   function setWorkspacePanelOpen(open, { focusConnectors = false, persist = true, load = true } = {}) {
     state.workspacePanelOpen = Boolean(open);
     syncWorkspacePanelVisibility();
+    if (state.workspacePanelOpen) resetWorkspaceStampWatch();
+    else stopWorkspaceStampWatch();
     if (persist) {
       try { localStorage.setItem('arenaPersonal.workspacePanelOpen.v4', state.workspacePanelOpen ? '1' : '0'); } catch { /* storage unavailable */ }
     }
@@ -523,10 +571,42 @@
         return;
       }
       const shown = content.length > 250000 ? `${content.slice(0, 250000)}\n\n… [preview truncated]` : content;
+      const editAction = {
+        label: 'Edit', variant: 'quiet', icon: 'code',
+        onClick: async ({ body, close }) => {
+          const ta = el('textarea', { class: 'file-editor', spellcheck: 'false', rows: '18', 'aria-label': `Edit ${entry.name}` });
+          ta.value = content;
+          const saveBtn = el('button', { class: 'button', type: 'button' }, iconEl('check'), el('span', { text: 'Save' }));
+          const cancelBtn = el('button', { class: 'button button-quiet', type: 'button' }, el('span', { text: 'Cancel' }));
+          cancelBtn.addEventListener('click', () => close());
+          saveBtn.addEventListener('click', async () => {
+            saveBtn.disabled = true;
+            try {
+              await API.saveWorkspaceFile(entry.path, ta.value);
+              toast('Saved to disk.', 'success');
+              void refreshWorkspacePanel({ force: true });
+              scheduleChatProjectRefresh();
+              close();
+            } catch (error) {
+              saveBtn.disabled = false;
+              toast(errorMessage(error), 'error', 'Save failed');
+            }
+          });
+          clear(body);
+          body.append(
+            el('div', { class: 'note-box' }, iconEl('info'), el('span', { text: 'Saving writes this file on your computer in the workspace folder.' })),
+            ta,
+            el('div', { class: 'file-editor-actions' }, saveBtn, cancelBtn)
+          );
+          ta.focus();
+          return false;
+        }
+      };
       open([
-        el('div', { class: 'note-box' }, iconEl('info'), el('span', { text: 'Preview is read-only. To modify the file, open the folder in your editor.' })),
+        el('div', { class: 'note-box' }, iconEl('info'), el('span', { text: 'Preview shows the file as it is on disk. Use Edit to change it.' })),
         el('pre', { class: 'file-preview-pre', text: shown || '[empty file]' })
       ], [
+        editAction,
         {
           label: 'Copy', variant: 'quiet', icon: 'copy',
           onClick: async () => {

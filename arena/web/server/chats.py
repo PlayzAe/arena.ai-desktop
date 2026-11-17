@@ -76,6 +76,25 @@ def _synced_stamp(session, merged, remote_messages):
     return history_sync.last_activity(session)
 
 
+@app.route("/api/chats/<chat_id>/project")
+def api_chat_project(chat_id):
+    """Where this chat's Code-mode project lives, relative to the workspace panel root."""
+    if not _validate_chat_id(chat_id):
+        return jsonify({"error": "Invalid chat ID"}), 400
+    existing = _load_chat(chat_id)
+    if not existing:
+        return jsonify({"error": "Chat not found"}), 404
+    mode = str(existing.get("mode") or "direct")
+    root = _code_root(chat_id, str(existing.get("title") or ""), "a", mode).resolve()
+    panel = _panel_workspace_root()
+    try:
+        rel = root.relative_to(panel).as_posix()
+    except ValueError:
+        return jsonify({"error": "This chat's project folder is outside the workspace panel."}), 409
+    return jsonify({"root": str(root), "rel": rel, "name": root.name,
+                    "lane": "a", "mode": mode, "modality": existing.get("modality")})
+
+
 @app.route("/api/chats/<chat_id>/sync-project", methods=["POST"])
 def api_chat_sync_project(chat_id):
     """Pull the finished Code project of a linked chat into its folder (files, images it can still reach, link)."""
@@ -295,16 +314,6 @@ _update_cache = {"t": 0.0, "data": None}
 _release_cache: dict = {}
 
 
-def _version_tuple(v) -> tuple:
-    parts = []
-    for bit in str(v or "").lstrip("v").split("."):
-        try:
-            parts.append(int(bit))
-        except ValueError:
-            parts.append(0)
-    return tuple(parts) or (0,)
-
-
 @app.route("/api/update-check")
 def api_update_check():
     """Compare APP_VERSION with the latest GitHub release (cached 6h).
@@ -336,7 +345,7 @@ def api_update_check():
             data["latest"] = latest or None
             data["url"] = payload.get("html_url")
             data["prerelease"] = bool(payload.get("prerelease"))
-            data["update"] = bool(latest) and _version_tuple(latest) > _version_tuple(APP_VERSION)
+            data["update"] = bool(latest) and updater.version_tuple(latest) > updater.version_tuple(APP_VERSION)
             data.update(updater.release_info(payload))
             _release_cache[channel] = payload
         else:

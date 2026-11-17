@@ -581,11 +581,12 @@ def _api_chat_impl():
         if modality == "webdev" and conv["new"]:
             send = ("[Arena Desktop] The user's computer only receives text files you write and images saved under public/. "
                     "Save every generated image or other binary file under public/ (for example public/images/hero.jpg).\n") + send
-        if modality == "webdev" and not dual and not conv["new"]:
-            changed, note = _local_edits(_code_root(conv["chat_id"], conv["title"], "a", conv["mode"]))
+        if modality == "webdev" and not dual:
+            changed, note = _local_edits(_code_root(conv["chat_id"], conv["title"], "a", conv["mode"]), message)
             if changed:
-                send = note + send
-                yield _sse({"type": "notice", "text": "Sent your local edits to the AI: " + ", ".join(changed)})
+                # the note ends with "My message:" - drop it in right before the text
+                send = send[: -len(message)] + note + message
+                yield _sse({"type": "notice", "text": "Sent your local files to the AI: " + ", ".join(changed)})
         history_chars = _history_chars(history)
         if fanout_models:
             out = yield from _fanout_run(client, message, conv, fanout_models)

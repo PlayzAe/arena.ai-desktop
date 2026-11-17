@@ -842,6 +842,7 @@
     state.historyError = null;
     state.historyLoading = true;
     state.view = 'chat';
+    resetChatProject();
     renderChats();
     renderChatHead();
     renderChallenge();
@@ -861,6 +862,7 @@
         state.mode = selection.mode;
         state.modality = selection.modality;
         state.selectionTouched = true;
+        void setupChatProject(String(chatId), String(selection.modality || ''));
         if (chat.agent_backend) state.agentKind = chat.agent_backend === 'arena' ? 'native' : 'local';
         // Each chat keeps the folder it worked in. Opening it switches back to
         // that folder, so "continue" never runs in the folder of whichever

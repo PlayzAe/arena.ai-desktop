@@ -359,6 +359,20 @@
       if (!(key in demoWorkspaceFileData)) throw new ApiError("Demo file not found or unavailable for preview.", 404);
       return { path: key, name: key.split('/').pop(), size: demoWorkspaceFileData[key].length, content: demoWorkspaceFileData[key], demo: true };
     },
+    async saveWorkspaceFile(path, content) {
+      await sleep(120);
+      const key = String(path || '');
+      demoWorkspaceFileData[key] = String(content ?? '');
+      return { ok: true, path: key, name: key.split('/').pop(), size: demoWorkspaceFileData[key].length, demo: true };
+    },
+    async getWorkspaceStamp() {
+      await sleep(40);
+      return { ok: true, stamp: 'demo', path: '.', demo: true };
+    },
+    async getChatProject() {
+      await sleep(60);
+      return { root: demoStore.workspace, rel: '.', name: 'Demo', lane: 'a', mode: 'direct', modality: 'webdev', demo: true };
+    },
     async getConnectors() { await sleep(110); return demoConnectorsPayload(); },
     async reloadConnectors() { await sleep(110); return demoConnectorsPayload(); },
     async openConnectorConfig() { await sleep(110); return { ok: true, path: 'C:\\Users\\Demo\\.arena-personal\\mcp.json', demo: true }; },

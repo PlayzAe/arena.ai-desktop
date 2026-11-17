@@ -410,6 +410,86 @@ def api_workspace_tree():
     return jsonify({"root": str(root), "path": rel, "entries": entries, "truncated": truncated})
 
 
+# Folders whose *contents* never matter to the panel tree (dependencies, VCS
+# state, caches, the app's own logs). The rows themselves are still stamped:
+# a folder appearing or disappearing moves the stamp through its parent.
+_STAMP_SKIP_DIRS = frozenset({
+    ".git", "node_modules", "__pycache__", ".venv", "venv", ".tox", ".nox",
+    ".mypy_cache", ".pytest_cache", ".ruff_cache", ".parcel-cache", ".next",
+    ".nuxt", ".svelte-kit", ".turbo", ".cache", ".arena-artifacts",
+    ".arena-write-test",
+}) | {name.lower() for name in _SENSITIVE_DIRS}
+_STAMP_MAX_ENTRIES = 20000
+_STAMP_MAX_PER_DIR = 2000
+
+
+def _workspace_stamp(target: Path) -> str:
+    """One cheap, deterministic fingerprint of the visible tree under target.
+
+    Hashes each entry's relative path, kind, size and timestamps; walks with
+    sorted names so identical folder states always hash identically, and stops
+    at a hard entry cap with an explicit marker so huge trees stay bounded.
+    """
+    import hashlib
+    import stat as statmod
+    h = hashlib.blake2b(digest_size=10)
+    total = 0
+    for dirpath, dirnames, filenames in os.walk(target, followlinks=False):
+        rel = os.path.relpath(dirpath, target).replace(os.sep, "/")
+        names = sorted(list(dirnames) + list(filenames))
+        # Descend only into folders that matter; their rows are still stamped
+        # below (presence-only) so the tree can see them appear/disappear.
+        dirnames[:] = sorted(d for d in dirnames if d.lower() not in _STAMP_SKIP_DIRS)
+        if len(names) > _STAMP_MAX_PER_DIR:
+            h.update(f"{rel}|dir-cap|{len(names)}\n".encode("utf-8", "replace"))
+            continue
+        for name in names:
+            total += 1
+            if total > _STAMP_MAX_ENTRIES:
+                h.update(b"|entry-cap")
+                return h.hexdigest()
+            full = os.path.join(dirpath, name)
+            if name.lower() in _STAMP_SKIP_DIRS:
+                # Presence-only: the tree shows just the row, and the contents
+                # (dependencies, logs, caches) churn invisibly. Sensitive rows
+                # keep their stats private too.
+                h.update(f"{rel}/{name}|skip\n".encode("utf-8", "replace"))
+                continue
+            try:
+                st = os.lstat(full)
+            except OSError:
+                h.update(f"{rel}/{name}|gone\n".encode("utf-8", "replace"))
+                continue
+            kind = "d" if statmod.S_ISDIR(st.st_mode) else "l" if statmod.S_ISLNK(st.st_mode) else "f"
+            # Exactly what a tree row renders (name, kind, size, modified time):
+            # two states the tree cannot tell apart must hash the same, so the
+            # poll never reloads the tree for an invisible change.
+            h.update(f"{rel}/{name}|{kind}|{st.st_size}|{st.st_mtime_ns}\n".encode("utf-8", "replace"))
+    return h.hexdigest()
+
+
+@app.route("/api/workspace/stamp")
+def api_workspace_stamp():
+    """Cheap change fingerprint for the panel tree; the UI polls it to know
+    when external edits (VS Code, builds, git) require a tree reload."""
+    try:
+        target, root = _workspace_panel_path(request.args.get("path", "."))
+    except PermissionError as e:
+        return jsonify({"error": str(e)}), 403
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return jsonify({"error": f"Workspace is unavailable: {e}"}), 500
+    if not target.is_dir():
+        return jsonify({"error": "Not a directory"}), 400
+    rel = "." if target == root else target.relative_to(root).as_posix()
+    try:
+        stamp = _workspace_stamp(target)
+    except OSError as e:
+        return jsonify({"error": f"Workspace is unavailable: {e}"}), 500
+    return jsonify({"ok": True, "stamp": stamp, "path": rel})
+
+
 @app.route("/api/workspace/file")
 def api_workspace_file():
     try:
@@ -432,6 +512,37 @@ def api_workspace_file():
         "size": len(data),
         "content": data.decode("utf-8", errors="replace"),
     })
+
+
+@app.route("/api/workspace/file", methods=["POST"])
+def api_workspace_file_save():
+    """Save an edited text file from the workspace panel editor. The click is the approval."""
+    data = request.get_json(silent=True) or {}
+    rel = str(data.get("path") or "")
+    content = data.get("content")
+    if not rel or not isinstance(content, str):
+        return jsonify({"error": "Missing file path or content"}), 400
+    try:
+        raw = content.encode("utf-8")
+    except UnicodeEncodeError:
+        return jsonify({"error": "The file content is not valid text"}), 400
+    if len(raw) > 512 * 1024:
+        return jsonify({"error": "File is too large to edit here (512 KB limit)"}), 400
+    if b"\x00" in raw:
+        return jsonify({"error": "Binary files cannot be edited here"}), 415
+    try:
+        target, root = _workspace_panel_path(rel)
+    except PermissionError as e:
+        return jsonify({"error": str(e)}), 403
+    if target.is_dir():
+        return jsonify({"error": "That path is a folder"}), 400
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(raw)
+    except OSError as e:
+        return jsonify({"error": f"Could not save the file: {e}"}), 500
+    return jsonify({"ok": True, "path": target.relative_to(root).as_posix(),
+                    "name": target.name, "size": len(raw)})
 
 
 @app.route("/api/workspace/download")

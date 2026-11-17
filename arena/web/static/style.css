@@ -3402,3 +3402,71 @@ body.is-resizing-y, body.is-resizing-y * { cursor: ns-resize !important; }
 .update-bar.is-wait .update-bar-fill { width: 40%; animation: update-bar-wait 1s ease-in-out infinite; }
 @keyframes update-bar-wait { 0% { transform: translateX(-100%); } 100% { transform: translateX(250%); } }
 @media (prefers-reduced-motion: reduce) { .update-bar.is-wait .update-bar-fill { animation: none; } }
+
+/* ---- Code-mode project tree (chat) + file editor ---- */
+.chat-project {
+  position: relative;
+  z-index: 11;
+  flex: 0 0 auto;
+  width: min(100%, 932px);
+  margin: 0 auto;
+  padding: 0 25px 6px;
+}
+.chat-project-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 28px;
+  padding: 3px 8px;
+  color: #c3ccc5;
+  background: #212524;
+  border: 1px solid #2b302e;
+  border-radius: 8px;
+  cursor: pointer;
+  font: 560 10.5px/1.4 var(--font-sans);
+  text-align: left;
+}
+.chat-project-head:hover { background: #252928; color: #e5eae6; }
+.chat-project-icon { width: 13px; height: 13px; color: #91a194; flex: 0 0 13px; }
+.chat-project-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-project-refresh { margin-left: auto; flex: 0 0 auto; }
+.chat-project-body {
+  max-height: 220px;
+  overflow: auto;
+  margin-top: 4px;
+  padding: 3px;
+  background: #1c1f1e;
+  border: 1px solid #2b302e;
+  border-radius: 8px;
+}
+.chat-project-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 24px;
+  padding: 2px 6px;
+  color: #c3ccc5;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.chat-project-row:hover { background: #252928; color: #e5eae6; }
+.chat-project-row.is-dir { color: #d4ddd5; font-weight: 560; }
+.chat-project-row .icon { width: 12px; height: 12px; color: #91a194; }
+.chat-project-caret { width: 12px; flex: 0 0 12px; color: #78837b; }
+.chat-project-name { overflow: hidden; text-overflow: ellipsis; }
+.file-editor {
+  width: 100%;
+  min-height: 46dvh;
+  resize: vertical;
+  padding: 10px;
+  color: #c3cfc5;
+  background: #181b1a;
+  border: 1px solid #2b302e;
+  border-radius: 8px;
+  font: 10.5px/1.6 var(--font-mono);
+  white-space: pre;
+}
+.file-editor:focus-visible { outline-offset: -2px; }
+.file-editor-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }

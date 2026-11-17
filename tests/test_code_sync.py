@@ -119,9 +119,14 @@ def test_update_check_flags_a_newer_release(monkeypatch):
         status_code = 200
         @staticmethod
         def json():
+            # One installable asset per platform, same digest: the route picks
+            # per-platform but the checksum plumbing is what is under test.
+            digest = "sha256:" + "a" * 64
             return {"tag_name": "v1.6.1", "html_url": "u", "body": "- Fixed saving images",
-                    "assets": [{"name": "Arena-Desktop.exe", "browser_download_url": "d", "size": 5,
-                                "digest": "sha256:" + "a" * 64}]}
+                    "assets": [{"name": name, "browser_download_url": "d", "size": 5,
+                                "digest": digest}
+                               for name in ("Arena-Desktop.exe", "Arena-Desktop-linux-x86_64",
+                                            "Arena-Desktop-macos")]}
     monkeypatch.setattr(web.requests, "get", lambda *a, **k: R())
     monkeypatch.setattr(web, "APP_VERSION", "1.6.0")
     web._update_cache.clear()

@@ -676,6 +676,9 @@
       return resp.json();
     },
     getWorkspaceFile(path) { return this.request(`/api/workspace/file?path=${encodeURIComponent(path)}`); },
+    getWorkspaceStamp(path = '.') { return this.request(`/api/workspace/stamp?path=${encodeURIComponent(path)}`); },
+    saveWorkspaceFile(path, content) { return this.request('/api/workspace/file', { method: 'POST', body: { path, content } }); },
+    getChatProject(chatId) { return this.request(`/api/chats/${encodeURIComponent(chatId)}/project`); },
     async downloadWorkspaceFile(path) {
       let response;
       try {
@@ -1474,6 +1477,20 @@
       const key = String(path || '');
       if (!(key in demoWorkspaceFileData)) throw new ApiError("Demo file not found or unavailable for preview.", 404);
       return { path: key, name: key.split('/').pop(), size: demoWorkspaceFileData[key].length, content: demoWorkspaceFileData[key], demo: true };
+    },
+    async saveWorkspaceFile(path, content) {
+      await sleep(120);
+      const key = String(path || '');
+      demoWorkspaceFileData[key] = String(content ?? '');
+      return { ok: true, path: key, name: key.split('/').pop(), size: demoWorkspaceFileData[key].length, demo: true };
+    },
+    async getWorkspaceStamp() {
+      await sleep(40);
+      return { ok: true, stamp: 'demo', path: '.', demo: true };
+    },
+    async getChatProject() {
+      await sleep(60);
+      return { root: demoStore.workspace, rel: '.', name: 'Demo', lane: 'a', mode: 'direct', modality: 'webdev', demo: true };
     },
     async getConnectors() { await sleep(110); return demoConnectorsPayload(); },
     async reloadConnectors() { await sleep(110); return demoConnectorsPayload(); },
@@ -6361,6 +6378,7 @@ You can start with a more structured option: one script, short captions, and a c
     state.historyError = null;
     state.historyLoading = true;
     state.view = 'chat';
+    resetChatProject();
     renderChats();
     renderChatHead();
     renderChallenge();
@@ -6380,6 +6398,7 @@ You can start with a more structured option: one script, short captions, and a c
         state.mode = selection.mode;
         state.modality = selection.modality;
         state.selectionTouched = true;
+        void setupChatProject(String(chatId), String(selection.modality || ''));
         if (chat.agent_backend) state.agentKind = chat.agent_backend === 'arena' ? 'native' : 'local';
         // Each chat keeps the folder it worked in. Opening it switches back to
         // that folder, so "continue" never runs in the folder of whichever
@@ -6919,6 +6938,7 @@ You can start with a more structured option: one script, short captions, and a c
       if (event.mode) turn.mode = event.mode;
       if (event.modality) turn.modality = event.modality;
       if (event.chat_id && !state.activeChatId) state.activeChatId = String(event.chat_id);
+      void setupChatProject(String(event.chat_id || generation.chatId || ''), String(event.modality || turn.modality || ''));
       if (!generation._chatsReloaded) {
         // The backend has saved this chat by now (it does so before the
         // stream starts), so refresh the sidebar with the real entry.
@@ -7168,6 +7188,7 @@ You can start with a more structured option: one script, short captions, and a c
       return;
     }
     if (type === 'sandbox' || type === 'sandbox_done') {
+      scheduleChatProjectRefresh();
       addActivity(turn, lane, {
         ...event,
         name: event.title ?? event.name ?? (event.status === 'done' ? "Sandbox completed" : "Sandbox"),
@@ -7201,6 +7222,7 @@ You can start with a more structured option: one script, short captions, and a c
       return;
     }
     if (type === 'files_written' || type === 'files') {
+      scheduleChatProjectRefresh();
       const list = Array.isArray(event.files) ? event.files : Array.isArray(event.data) ? event.data : Array.isArray(event.paths) ? event.paths : [];
       list.forEach((file) => {
         const artifact = normalizeArtifact(file, 'file');
@@ -7245,6 +7267,7 @@ You can start with a more structured option: one script, short captions, and a c
     if (type === 'notice') {
       const message = textValue(event.message ?? event.text ?? event.notice ?? event.data);
       if (message && !lane.notices.includes(message)) lane.notices.push(message);
+      scheduleChatProjectRefresh();
       scheduleChatRender();
       return;
     }
@@ -10294,6 +10317,7 @@ You can start with a more structured option: one script, short captions, and a c
     state.workspaceExpanded = new Set();
     state.workspaceLoadingPaths = new Set();
     state.workspaceRequest += 1;
+    resetWorkspaceStampWatch();
   }
 
   // The Workspace panel follows the folder by itself: a folder being chosen or
@@ -10309,6 +10333,51 @@ You can start with a more structured option: one script, short captions, and a c
       const expanded = [...(state.workspaceExpanded || [])];
       await Promise.allSettled(expanded.map((path) => loadWorkspaceTree(path, { force: true })));
     }, delay);
+  }
+
+  // Changes made *outside* the app (edits in VS Code, builds, git) reach the
+  // tree through a cheap folder-stamp poll: while the panel is open and the
+  // window is visible, ask for the stamp every few seconds and reload the
+  // tree only when it moved. The poll pauses itself when nothing needs it.
+  let workspaceStampTimer = null;
+  let workspaceStampLast = null;
+  const WORKSPACE_STAMP_POLL_MS = 2500;
+
+  function scheduleWorkspaceStampPoll(delay = WORKSPACE_STAMP_POLL_MS) {
+    if (workspaceStampTimer) window.clearTimeout(workspaceStampTimer);
+    workspaceStampTimer = window.setTimeout(pollWorkspaceStamp, delay);
+  }
+
+  async function pollWorkspaceStamp() {
+    workspaceStampTimer = null;
+    if (!state.workspacePanelOpen || state.serverError || document.hidden) {
+      scheduleWorkspaceStampPoll();
+      return;
+    }
+    try {
+      const data = await API.getWorkspaceStamp('.');
+      const stamp = String(data?.stamp || '');
+      if (stamp) {
+        if (workspaceStampLast === null) workspaceStampLast = stamp;
+        else if (stamp !== workspaceStampLast) {
+          workspaceStampLast = stamp;
+          scheduleWorkspaceTreeRefresh(0);
+          if (typeof scheduleChatProjectRefresh === 'function') scheduleChatProjectRefresh();
+        }
+      }
+    } catch { /* transient: retry on the next tick */ }
+    scheduleWorkspaceStampPoll();
+  }
+
+  function resetWorkspaceStampWatch() {
+    workspaceStampLast = null;
+    scheduleWorkspaceStampPoll(600);
+  }
+
+  function stopWorkspaceStampWatch() {
+    if (workspaceStampTimer) window.clearTimeout(workspaceStampTimer);
+    workspaceStampTimer = null;
+    workspaceStampLast = null;
   }
 
   function syncWorkspacePanelVisibility() {
@@ -10327,6 +10396,8 @@ You can start with a more structured option: one script, short captions, and a c
   function setWorkspacePanelOpen(open, { focusConnectors = false, persist = true, load = true } = {}) {
     state.workspacePanelOpen = Boolean(open);
     syncWorkspacePanelVisibility();
+    if (state.workspacePanelOpen) resetWorkspaceStampWatch();
+    else stopWorkspaceStampWatch();
     if (persist) {
       try { localStorage.setItem('arenaPersonal.workspacePanelOpen.v4', state.workspacePanelOpen ? '1' : '0'); } catch { /* storage unavailable */ }
     }
@@ -10777,10 +10848,42 @@ You can start with a more structured option: one script, short captions, and a c
         return;
       }
       const shown = content.length > 250000 ? `${content.slice(0, 250000)}\n\n… [preview truncated]` : content;
+      const editAction = {
+        label: 'Edit', variant: 'quiet', icon: 'code',
+        onClick: async ({ body, close }) => {
+          const ta = el('textarea', { class: 'file-editor', spellcheck: 'false', rows: '18', 'aria-label': `Edit ${entry.name}` });
+          ta.value = content;
+          const saveBtn = el('button', { class: 'button', type: 'button' }, iconEl('check'), el('span', { text: 'Save' }));
+          const cancelBtn = el('button', { class: 'button button-quiet', type: 'button' }, el('span', { text: 'Cancel' }));
+          cancelBtn.addEventListener('click', () => close());
+          saveBtn.addEventListener('click', async () => {
+            saveBtn.disabled = true;
+            try {
+              await API.saveWorkspaceFile(entry.path, ta.value);
+              toast('Saved to disk.', 'success');
+              void refreshWorkspacePanel({ force: true });
+              scheduleChatProjectRefresh();
+              close();
+            } catch (error) {
+              saveBtn.disabled = false;
+              toast(errorMessage(error), 'error', 'Save failed');
+            }
+          });
+          clear(body);
+          body.append(
+            el('div', { class: 'note-box' }, iconEl('info'), el('span', { text: 'Saving writes this file on your computer in the workspace folder.' })),
+            ta,
+            el('div', { class: 'file-editor-actions' }, saveBtn, cancelBtn)
+          );
+          ta.focus();
+          return false;
+        }
+      };
       open([
-        el('div', { class: 'note-box' }, iconEl('info'), el('span', { text: 'Preview is read-only. To modify the file, open the folder in your editor.' })),
+        el('div', { class: 'note-box' }, iconEl('info'), el('span', { text: 'Preview shows the file as it is on disk. Use Edit to change it.' })),
         el('pre', { class: 'file-preview-pre', text: shown || '[empty file]' })
       ], [
+        editAction,
         {
           label: 'Copy', variant: 'quiet', icon: 'copy',
           onClick: async () => {
@@ -12348,4 +12451,187 @@ You can start with a more structured option: one script, short captions, and a c
   } else {
     void boot();
   }
+  // ═══ 15-project.js ═══
+  /* ---------------------------------------------------------------------- */
+  /* Code-mode project files: a small tree of the chat's own project folder, */
+  /* shown above the composer and refreshed while the sandbox writes files.  */
+  /* Clicking a file opens the same preview/editor as the workspace panel.   */
+  /* ---------------------------------------------------------------------- */
+
+  const chatProject = {
+    chatId: null,
+    rel: '',
+    name: '',
+    open: true,
+    ready: false,
+    loading: false,
+    error: '',
+    expanded: new Set(),
+    dirs: new Map()
+  };
+  let chatProjectTimer = null;
+
+  function chatProjectPanelEl() {
+    return document.getElementById('chatProjectPanel');
+  }
+
+  function resetChatProject() {
+    chatProject.chatId = null;
+    chatProject.rel = '';
+    chatProject.name = '';
+    chatProject.ready = false;
+    chatProject.loading = false;
+    chatProject.error = '';
+    chatProject.expanded = new Set();
+    chatProject.dirs = new Map();
+    const panel = chatProjectPanelEl();
+    if (panel) panel.hidden = true;
+    clear(panel || document.createElement('div'));
+  }
+
+  async function setupChatProject(chatId, modality) {
+    resetChatProject();
+    const canonical = ({ chat: 'text', webdev: 'code' })[modality] || modality;
+    if (!chatId || canonical !== 'code') return;
+    const panel = chatProjectPanelEl();
+    if (!panel) return;
+    chatProject.chatId = String(chatId);
+    chatProject.loading = true;
+    panel.hidden = false;
+    renderChatProjectPanel();
+    try {
+      const info = await API.getChatProject(chatId);
+      if (String(chatProject.chatId) !== String(chatId)) return;
+      if (!info || info.demo || typeof info.rel === 'string') {
+        chatProject.rel = String(info?.rel ?? '.');
+        chatProject.name = String(info?.name || 'Project');
+        chatProject.ready = true;
+        await loadChatProjectDir(chatProject.rel);
+      } else {
+        chatProject.error = 'The project folder for this chat is not available.';
+      }
+    } catch (error) {
+      if (String(chatProject.chatId) !== String(chatId)) return;
+      chatProject.error = errorMessage(error);
+    }
+    chatProject.loading = false;
+    renderChatProjectPanel();
+  }
+
+  async function loadChatProjectDir(path) {
+    try {
+      const data = await API.getWorkspaceTree(path);
+      chatProject.dirs.set(path, Array.isArray(data?.entries) ? data.entries : []);
+      chatProject.error = '';
+    } catch (error) {
+      chatProject.error = errorMessage(error);
+    }
+    renderChatProjectPanel();
+  }
+
+  function scheduleChatProjectRefresh() {
+    if (!chatProject.ready || !chatProject.chatId) return;
+    if (chatProjectTimer) return;
+    chatProjectTimer = setTimeout(() => {
+      chatProjectTimer = null;
+      void refreshChatProject();
+    }, 600);
+  }
+
+  async function refreshChatProject() {
+    if (!chatProject.ready || !chatProject.chatId) return;
+    const paths = [chatProject.rel, ...Array.from(chatProject.expanded)];
+    await Promise.all(paths.map((path) => loadChatProjectDir(path).catch(() => {})));
+    renderChatProjectPanel();
+  }
+
+  function chatProjectRow(entry, depth) {
+    const row = el('div', {
+      class: `chat-project-row${entry.is_dir ? ' is-dir' : ''}`,
+      role: 'treeitem',
+      'data-path': entry.path,
+      style: `padding-left:${depth * 14}px`,
+      title: entry.path
+    });
+    row.appendChild(el('span', { class: 'chat-project-caret', 'aria-hidden': 'true' },
+      entry.is_dir ? iconEl('chevron-right') : iconEl('file')));
+    row.appendChild(el('span', { class: 'chat-project-name', text: entry.name }));
+    if (entry.is_dir) {
+      row.addEventListener('click', () => {
+        if (chatProject.expanded.has(entry.path)) {
+          chatProject.expanded.delete(entry.path);
+          renderChatProjectPanel();
+        } else {
+          chatProject.expanded.add(entry.path);
+          renderChatProjectPanel();
+          if (!chatProject.dirs.has(entry.path)) void loadChatProjectDir(entry.path);
+        }
+      });
+    } else {
+      row.addEventListener('click', () => {
+        void openWorkspaceFilePreview(entry);
+      });
+    }
+    return row;
+  }
+
+  function chatProjectChildren(path, depth, out) {
+    const entries = chatProject.dirs.get(path) || [];
+    for (const entry of entries) {
+      out.push(chatProjectRow(entry, depth));
+      if (entry.is_dir && chatProject.expanded.has(entry.path)) {
+        chatProjectChildren(entry.path, depth + 1, out);
+      }
+    }
+  }
+
+  function renderChatProjectPanel() {
+    const panel = chatProjectPanelEl();
+    if (!panel) return;
+    if (!chatProject.chatId) {
+      panel.hidden = true;
+      return;
+    }
+    panel.hidden = false;
+    clear(panel);
+    const head = el('button', {
+      class: 'chat-project-head',
+      type: 'button',
+      'aria-expanded': String(chatProject.open)
+    });
+    head.appendChild(iconEl('folder', 'chat-project-icon'));
+    head.appendChild(el('span', { class: 'chat-project-title', text: chatProject.name || 'Project files' }));
+    if (chatProject.loading) head.appendChild(el('span', { class: 'mini-spinner' }));
+    head.addEventListener('click', () => {
+      chatProject.open = !chatProject.open;
+      renderChatProjectPanel();
+    });
+    const refresh = el('button', {
+      class: 'button button-small button-quiet chat-project-refresh',
+      type: 'button',
+      title: 'Refresh the file tree'
+    }, iconEl('refresh'), el('span', { text: 'Refresh' }));
+    refresh.addEventListener('click', (event) => {
+      event.stopPropagation();
+      void refreshChatProject();
+    });
+    head.appendChild(refresh);
+    panel.appendChild(head);
+    if (!chatProject.open) return;
+    const body = el('div', { class: 'chat-project-body', role: 'tree' });
+    if (chatProject.error && !chatProject.dirs.size) {
+      body.appendChild(el('div', { class: 'workspace-tree-error', text: chatProject.error }));
+    } else {
+      const rows = [];
+      chatProjectChildren(chatProject.rel, 1, rows);
+      if (!rows.length) {
+        body.appendChild(el('div', { class: 'workspace-tree-empty',
+          text: chatProject.loading ? 'Loading files…' : 'No files yet - they appear here as the AI writes them.' }));
+      }
+      rows.forEach((row) => body.appendChild(row));
+      if (chatProject.error) body.appendChild(el('div', { class: 'workspace-tree-error', text: chatProject.error }));
+    }
+    panel.appendChild(body);
+  }
+
 })();

@@ -984,7 +984,7 @@ def test_generated_media_is_saved_to_the_picked_folder(web, tmp_path, monkeypatc
             pass
 
     monkeypatch.setattr(appmod, "_url_is_public", lambda url: None)  # URL vetting off: unit test
-    monkeypatch.setattr(appmod.requests, "get", lambda url, timeout: Got())
+    monkeypatch.setattr(appmod, "_pinned_request", lambda url, timeout=0: (200, b"PNG", "image/png"))
     out = list(appmod._save_media({"url": "https://cdn.example/img/cat.png", "kind": "image"}, "a", {"title": "A cat"}))
     saved = list((tmp_path / "ws").glob("*-a-*.png"))
     assert len(saved) == 1 and saved[0].read_bytes() == b"PNG" and "Saved to" in out[0]
@@ -1024,6 +1024,21 @@ def test_code_answer_is_copied_into_the_picked_folder_and_local_edits_go_back(we
     events(c.post("/api/chat", json={"message": "next", "model_id": "m1", "chat_id": cid}))
     content = sent[-1][1]["userMessage"]["content"]
     assert "--- src/App.tsx ---\nhello\nmine\n" in content and content.endswith("My message:\nnext")
+
+
+def test_named_project_files_ride_the_message_even_on_the_first_send(web, tmp_path):
+    """A file the AI never wrote, named in the message, must reach it - the KNOWN_ISSUES
+    gap where asking to edit an existing file made the AI create a new one instead."""
+    appmod, c, cfg, use, sent = web
+    cfg.update(permission_mode="acceptEdits", workspace_dir=str(tmp_path / "ws"))
+    (tmp_path / "ws").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "ws" / "kimi-k3.txt").write_bytes(b"hello\nworld\n")  # bytes: identical on every platform
+    appmod._ui_mode, appmod._ui_modality = "direct", "code"
+    use(FakeResp(['a0:"ok"']))
+    events(c.post("/api/chat", json={"message": "fix kimi-k3.txt please", "model_id": "m1"}))
+    content = sent[-1][1]["userMessage"]["content"]
+    assert "--- kimi-k3.txt ---\nhello\nworld\n" in content
+    assert content.endswith("My message:\nfix kimi-k3.txt please")
 
 
 # ---------- v4: automatic Agent, generation state, cloud history, panel API ----------
@@ -2195,7 +2210,7 @@ def test_native_file_bridge_downloads_and_dedupes(web, monkeypatch, tmp_path):
     cfg["permission_mode"] = "auto"
     cfg["workspace_dir"] = str(tmp_path / "picked")
     monkeypatch.setattr(appmod, "_url_is_public", lambda url: None)  # URL vetting off: unit test
-    monkeypatch.setattr(appmod.requests, "get", lambda url, timeout=None: _FakeDownload(b"print('hi')\n"))
+    monkeypatch.setattr(appmod, "_pinned_request", lambda url, timeout=0: (200, b"print('hi')\n", "text/x-python"))
     state = {}
     files = [{"url": "https://example.test/snake.py", "title": "snake.py", "kind": "file"}]
     ev, written = _bridge_events(appmod._native_file_bridge(files, state))
@@ -2212,7 +2227,7 @@ def test_native_file_bridge_respects_plan_and_sanitizes_names(web, monkeypatch, 
     appmod, _c, cfg, _use, _sent = web
     cfg["workspace_dir"] = str(tmp_path / "picked")
     monkeypatch.setattr(appmod, "_url_is_public", lambda url: None)  # URL vetting off: unit test
-    monkeypatch.setattr(appmod.requests, "get", lambda url, timeout=None: _FakeDownload(b"x"))
+    monkeypatch.setattr(appmod, "_pinned_request", lambda url, timeout=0: (200, b"x", "application/octet-stream"))
     files = [{"url": "https://example.test/evil", "title": "../../evil.txt", "kind": "file"}]
     cfg["permission_mode"] = "plan"
     plan_state = {}
