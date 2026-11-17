@@ -7,6 +7,7 @@ to whatsnew.json and shown once after the restart.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -22,12 +23,22 @@ import requests
 
 from arena import __version__
 from arena.config import CONFIG_DIR
+from arena.pinned_https import pinned_https_open
+from arena.signed_release import verify as _verify_signature
 
 REPO_API = "https://api.github.com/repos/PlayzAe/arena.ai-desktop"
 ASSET_NAME = "Arena-Desktop.exe"
 UPDATES_DIR = CONFIG_DIR / "updates"
 WHATSNEW_FILE = CONFIG_DIR / "whatsnew.json"
 UNINSTALL_KEY = r"HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\ArenaDesktop"
+
+# Release authenticity: while this holds a base64 Ed25519 public key (32 raw
+# bytes), every update must ship a detached signature (Arena-Desktop.exe.sig)
+# that verifies against it, or it is refused before anything is installed.
+# The maintainer creates the key with scripts/sign_release.py keygen and pins
+# the printed public key here; the secret never leaves their machine. Empty
+# keeps today's behavior (checksum-only, unsigned releases still install).
+RELEASE_PUBKEY = ""
 
 _job: Dict[str, Any] = {"state": "idle"}
 _lock = threading.Lock()
@@ -80,18 +91,38 @@ def release_info(release: Dict[str, Any]) -> Dict[str, Any]:
         "asset_url": asset.get("browser_download_url") if asset else None,
         "asset_size": asset.get("size") if asset else None,
         "sha256": sha,
+        "sig_url": _sig_asset_url(release),
+        "signed": _sig_asset_url(release) is not None,
         "can_install": bool(asset) and bool(getattr(sys, "frozen", False)),
     }
+
+
+def _sig_asset_url(release: Dict[str, Any]) -> Optional[str]:
+    for a in release.get("assets") or []:
+        if str(a.get("name", "")).lower() == f"{ASSET_NAME}.sig".lower():
+            return a.get("browser_download_url")
+    return None
+
+
+def _open_stream(url: str, timeout: float = 30):
+    """The one network seam: a started, vetted, pinned-transport response.
+    Release metadata must never be able to point the updater at a private or
+    internal address, and a DNS flip cannot reroute the socket mid-download."""
+    return pinned_https_open(url, timeout=timeout)
 
 
 def _fetch_sha(release: Dict[str, Any]) -> str:
     for a in release.get("assets") or []:
         if str(a.get("name", "")).lower() == f"{ASSET_NAME}.sha256".lower():
             try:
-                txt = requests.get(a["browser_download_url"], timeout=15).text
+                stream = _open_stream(a["browser_download_url"], timeout=15)
+                try:
+                    txt = b"".join(stream.iter_chunks()).decode("utf-8", "replace")
+                finally:
+                    stream.close()
                 m = re.search(r"\b[0-9a-fA-F]{64}\b", txt)
                 return m.group().lower() if m else ""
-            except requests.RequestException:
+            except (OSError, ValueError):
                 return ""
     return ""
 
@@ -106,26 +137,29 @@ def _set(**kw: Any) -> None:
         _job.update(kw)
 
 
-def _download(url: str, dest: Path, want_sha: str, version: str, expected: int = 0) -> None:
+def _download(url: str, dest: Path, want_sha: str, version: str, expected: int = 0,
+              sig_url: Optional[str] = None) -> None:
     try:
         UPDATES_DIR.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_suffix(".part")
         h = hashlib.sha256()
-        with requests.get(url, stream=True, timeout=30,
-                          headers={"User-Agent": f"Arena-Desktop/{__version__}"}) as r:
-            r.raise_for_status()
+        stream = _open_stream(url, timeout=30)
+        try:
+            if stream.status >= 400:
+                raise OSError(f"HTTP {stream.status}")
             # Content-Length is only the file size when the body is not encoded;
-            # for gzip responses it counts compressed bytes while iter_content
+            # for gzip responses it counts compressed bytes while iter_chunks
             # yields the decompressed file.
-            enc = (r.headers.get("Content-Encoding") or "").strip().lower()
-            total = 0 if enc and enc != "identity" else int(r.headers.get("Content-Length") or 0)
+            total = stream.content_length or 0
             done = 0
             with open(tmp, "wb") as f:
-                for chunk in r.iter_content(1 << 20):
+                for chunk in stream.iter_chunks(1 << 20):
                     f.write(chunk)
                     h.update(chunk)
                     done += len(chunk)
                     _set(done=done, total=total or expected)
+        finally:
+            stream.close()
         # A cut connection on a close-framed response ends the stream cleanly and
         # leaves a valid-looking prefix behind; the size is the only witness when
         # no checksum is available.
@@ -144,8 +178,31 @@ def _download(url: str, dest: Path, want_sha: str, version: str, expected: int =
             tmp.unlink(missing_ok=True)
             _set(state="error", error="Downloaded file is not a valid app. Nothing was installed.")
             return
+        verified: Any = bool(want_sha)
+        if RELEASE_PUBKEY:
+            # Fail closed: with a pinned key, only a correctly signed release
+            # may ever be swapped in. The signature covers the exact bytes the
+            # checksum saw, so both checks must agree before install.
+            ok = False
+            if sig_url:
+                try:
+                    sig_stream = _open_stream(sig_url, timeout=15)
+                    try:
+                        sig_blob = b"".join(sig_stream.iter_chunks())
+                    finally:
+                        sig_stream.close()
+                    sig = base64.b64decode(sig_blob.strip(), validate=True)
+                    pub = base64.b64decode(RELEASE_PUBKEY.strip(), validate=True)
+                    ok = _verify_signature(tmp.read_bytes(), sig, pub)
+                except Exception:  # noqa: BLE001 - any failure refuses the install
+                    ok = False
+            if not ok:
+                tmp.unlink(missing_ok=True)
+                _set(state="error", error="Download failed its signature check. Nothing was installed.")
+                return
+            verified = "signature"
         os.replace(tmp, dest)
-        _set(state="ready", path=str(dest), version=version, verified=bool(want_sha))
+        _set(state="ready", path=str(dest), version=version, verified=verified)
     except Exception as e:  # noqa: BLE001 - surfaced to the UI
         _set(state="error", error=f"Download failed: {e}")
 
@@ -163,9 +220,10 @@ def start_download(info: Dict[str, Any], release: Dict[str, Any]) -> Dict[str, A
         _job.update(state="downloading", done=0, total=info.get("asset_size") or 0,
                     version=info["latest"], notes=info.get("notes") or [])
     want = info.get("sha256") or _fetch_sha(release)
+    sig_url = info.get("sig_url") or _sig_asset_url(release)
     dest = UPDATES_DIR / f"Arena-Desktop-{info['latest']}.exe"
     threading.Thread(target=_download,
-                     args=(url, dest, want, info["latest"], int(info.get("asset_size") or 0)),
+                     args=(url, dest, want, info["latest"], int(info.get("asset_size") or 0), sig_url),
                      daemon=True).start()
     return {"ok": True, "state": "downloading"}
 

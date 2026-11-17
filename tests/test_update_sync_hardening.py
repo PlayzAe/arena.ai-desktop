@@ -82,23 +82,20 @@ def test_npm_install_asks_before_running_in_accept_edits(tmp_path, monkeypatch):
 # --- updater._download(): a cut stream must not become a 'ready' update ---
 
 class _StreamResp:
+    """Fake pinned stream (updater._open_stream seam)."""
+
     def __init__(self, body: bytes, total: int):
-        self.status_code = 200
-        self.headers = {"Content-Length": str(total)} if total else {}
+        self.status = 200
+        self.content_length = total
+        self.content_type = "application/octet-stream"
         self._body = body
 
-    def raise_for_status(self):
-        pass
-
-    def iter_content(self, chunk_size=0):
+    def iter_chunks(self, size=1 << 16):
         for i in range(0, len(self._body), 1 << 16):
             yield self._body[i:i + (1 << 16)]
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *a):
-        return False
+    def close(self):
+        pass
 
 
 def test_truncated_download_without_checksum_is_rejected(tmp_path, monkeypatch):
@@ -110,7 +107,7 @@ def test_truncated_download_without_checksum_is_rejected(tmp_path, monkeypatch):
     monkeypatch.setattr(updater, "_job", {})
     monkeypatch.setattr(updater.sys, "frozen", True, raising=False)
     body = b"MZ" + b"\0" * (1_200_000 - 2)  # 1.2 MB arrives of the promised 2 MB
-    monkeypatch.setattr(updater.requests, "get", lambda *a, **k: _StreamResp(body, 0))
+    monkeypatch.setattr(updater, "_open_stream", lambda url, timeout=0: _StreamResp(body, 0))
     res = updater.start_download(
         {"latest": "9.9.9", "asset_url": "https://example.invalid/a.exe",
          "asset_size": 2_000_000, "sha256": "", "notes": []},
@@ -128,7 +125,7 @@ def test_complete_download_without_checksum_is_ready(tmp_path, monkeypatch):
     body = b"MZ" + b"\0" * (1_200_000 - 2)
     monkeypatch.setattr(updater, "UPDATES_DIR", tmp_path / "up")
     monkeypatch.setattr(updater, "_job", {})
-    monkeypatch.setattr(updater.requests, "get", lambda *a, **k: _StreamResp(body, len(body)))
+    monkeypatch.setattr(updater, "_open_stream", lambda url, timeout=0: _StreamResp(body, len(body)))
     updater._download("https://example.invalid/a.exe", tmp_path / "up" / "new.exe", "", "9.9.9")
     st = updater.status()
     assert st["state"] == "ready" and st["verified"] is False
@@ -143,11 +140,13 @@ def test_content_encoded_download_is_not_flagged_truncated(tmp_path, monkeypatch
 
     class Encoded(_StreamResp):
         def __init__(self):
+            # A gzip-encoded response reports the COMPRESSED size in
+            # Content-Length while iter_chunks yields the decompressed bytes;
+            # the pinned stream hides encoded lengths (content_length = 0).
             super().__init__(body, 0)
-            self.headers = {"Content-Length": "400000", "Content-Encoding": "gzip"}
 
     monkeypatch.setattr(updater, "UPDATES_DIR", tmp_path / "up")
-    monkeypatch.setattr(updater.requests, "get", lambda *a, **k: Encoded())
+    monkeypatch.setattr(updater, "_open_stream", lambda url, timeout=0: Encoded())
     monkeypatch.setattr(updater, "_job", {})
     updater._download("https://example.invalid/a.exe", tmp_path / "up" / "new.exe", "", "9.9.9",
                       expected=len(body))

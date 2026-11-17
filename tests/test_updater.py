@@ -38,7 +38,24 @@ def test_pick_asset_prefers_portable_exe_not_setup():
 
 
 def test_download_verifies_checksum_and_exe_header(served, tmp_path, monkeypatch):
+    class _FileStream:
+        def __init__(self, body):
+            self._body = body
+            self.status = 200
+            self.content_length = len(body)
+            self.content_type = "application/octet-stream"
+
+        def iter_chunks(self, size=1 << 16):
+            for i in range(0, len(self._body), size):
+                yield self._body[i:i + size]
+
+        def close(self):
+            pass
+
     monkeypatch.setattr(updater, "UPDATES_DIR", tmp_path / "up")
+    monkeypatch.setattr(updater, "_job", {})
+    monkeypatch.setattr(updater, "_open_stream",
+                        lambda url, timeout=0: _FileStream((tmp_path / url.rsplit("/", 1)[-1]).read_bytes()))
     dest = tmp_path / "up" / "new.exe"
     updater._download(f"{served}/a.exe", dest, hashlib.sha256(EXE).hexdigest(), "9.9.9")
     assert updater.status()["state"] == "ready" and dest.read_bytes() == EXE

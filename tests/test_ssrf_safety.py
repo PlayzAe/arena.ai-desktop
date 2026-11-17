@@ -81,17 +81,16 @@ def test_url_is_public_vets_every_resolved_address(monkeypatch):
 
 def test_media_get_validates_before_any_fetch(monkeypatch):
     def boom(*a, **k):
-        raise _NoNetwork("requests.get must not be called for a blocked URL")
-    monkeypatch.setattr(appmod.requests, "get", boom)
+        raise _NoNetwork("no transport may be used for a blocked URL")
+    monkeypatch.setattr(appmod, "_pinned_request", boom)
+    monkeypatch.setattr(appmod, "_pinned_https_get", boom)
     with pytest.raises(ValueError):
         appmod._media_get("https://127.0.0.1/secret")
 
-    calls = []
-    monkeypatch.setattr(appmod.requests, "get",
-                        lambda url, timeout=None: calls.append((url, timeout)) or "response")
     monkeypatch.setattr(appmod, "_url_is_public", lambda url: None)  # unit test: vetting off
-    assert appmod._media_get("https://cdn.example/x.png", timeout=30) == "response"
-    assert calls == [("https://cdn.example/x.png", 30)]
+    monkeypatch.setattr(appmod, "_pinned_request", lambda url, timeout=0: (200, b"img", "image/png"))
+    r = appmod._media_get("https://cdn.example/x.png", timeout=30)
+    assert r.status_code == 200 and r.content == b"img"
 
 
 def test_pinned_https_get_connects_to_the_validated_ip(monkeypatch):
@@ -136,3 +135,31 @@ def test_media_save_endpoint_rejects_redirect_chains_off_host(web, monkeypatch):
                         lambda url, **k: (_ for _ in ()).throw(ValueError("Private/internal addresses not allowed.")))
     r = c.post("/api/media/save", json={"url": "https://innocent.example/a.png"})
     assert r.status_code == 400
+
+
+def test_media_get_uses_the_pinned_transport_not_plain_requests(monkeypatch):
+    # The old _media_get validated, then called requests.get - a second DNS
+    # resolution the attacker could win (rebinding) and redirects that walked
+    # anywhere. It must fetch through the single-resolve pinned transport.
+    def boom(*a, **k):
+        raise _NoNetwork("requests.get must never be called for media fetches")
+    monkeypatch.setattr(appmod.requests, "get", boom)
+    monkeypatch.setattr(appmod, "_url_is_public", lambda url: None)  # unit test: vetting off
+    seen = []
+    monkeypatch.setattr(appmod, "_pinned_request",
+                        lambda url, timeout=0: seen.append((url, timeout)) or (200, b"PNG", "image/png"))
+    r = appmod._media_get("https://cdn.example/x.png", timeout=30)
+    assert seen == [("https://cdn.example/x.png", 30)]
+    assert r.status_code == 200 and r.content == b"PNG"
+    assert r.headers.get("content-type") == "image/png"
+    r.raise_for_status()  # no raise on 200
+
+
+def test_media_get_shim_preserves_http_status_for_retries(monkeypatch):
+    monkeypatch.setattr(appmod, "_url_is_public", lambda url: None)
+    monkeypatch.setattr(appmod, "_pinned_request", lambda url, timeout=0: (503, b"", ""))
+    import requests as _rq
+    r = appmod._media_get("https://cdn.example/x.png", timeout=10)
+    assert r.status_code == 503 and r.content == b""
+    with pytest.raises(_rq.HTTPError):
+        r.raise_for_status()

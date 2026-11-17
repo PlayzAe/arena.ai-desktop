@@ -984,7 +984,7 @@ def test_generated_media_is_saved_to_the_picked_folder(web, tmp_path, monkeypatc
             pass
 
     monkeypatch.setattr(appmod, "_url_is_public", lambda url: None)  # URL vetting off: unit test
-    monkeypatch.setattr(appmod.requests, "get", lambda url, timeout: Got())
+    monkeypatch.setattr(appmod, "_pinned_request", lambda url, timeout=0: (200, b"PNG", "image/png"))
     out = list(appmod._save_media({"url": "https://cdn.example/img/cat.png", "kind": "image"}, "a", {"title": "A cat"}))
     saved = list((tmp_path / "ws").glob("*-a-*.png"))
     assert len(saved) == 1 and saved[0].read_bytes() == b"PNG" and "Saved to" in out[0]
@@ -2210,7 +2210,7 @@ def test_native_file_bridge_downloads_and_dedupes(web, monkeypatch, tmp_path):
     cfg["permission_mode"] = "auto"
     cfg["workspace_dir"] = str(tmp_path / "picked")
     monkeypatch.setattr(appmod, "_url_is_public", lambda url: None)  # URL vetting off: unit test
-    monkeypatch.setattr(appmod.requests, "get", lambda url, timeout=None: _FakeDownload(b"print('hi')\n"))
+    monkeypatch.setattr(appmod, "_pinned_request", lambda url, timeout=0: (200, b"print('hi')\n", "text/x-python"))
     state = {}
     files = [{"url": "https://example.test/snake.py", "title": "snake.py", "kind": "file"}]
     ev, written = _bridge_events(appmod._native_file_bridge(files, state))
@@ -2227,7 +2227,7 @@ def test_native_file_bridge_respects_plan_and_sanitizes_names(web, monkeypatch, 
     appmod, _c, cfg, _use, _sent = web
     cfg["workspace_dir"] = str(tmp_path / "picked")
     monkeypatch.setattr(appmod, "_url_is_public", lambda url: None)  # URL vetting off: unit test
-    monkeypatch.setattr(appmod.requests, "get", lambda url, timeout=None: _FakeDownload(b"x"))
+    monkeypatch.setattr(appmod, "_pinned_request", lambda url, timeout=0: (200, b"x", "application/octet-stream"))
     files = [{"url": "https://example.test/evil", "title": "../../evil.txt", "kind": "file"}]
     cfg["permission_mode"] = "plan"
     plan_state = {}
